@@ -2,12 +2,15 @@ import os
 
 from flask import Flask
 
+from db import init_db
+
 PORT = int(os.environ.get("PORT", "8000"))
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
 
 def create_app():
     os.makedirs(DATA_DIR, exist_ok=True)
+    init_db()
     app = Flask(__name__)
 
     @app.route("/")
