@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Targets for {{ member.name }}{% endblock %}
+{% block content %}
+<h1>Targets for {{ member.name }}</h1>
+<p>Role: {{ member.role_name }}</p>
+
+{% if error %}
+<p><strong>{{ error }}</strong></p>
+{% endif %}
+
+<h2>Set targets</h2>
+{% if kpis %}
+<form method="post">
+    <p><label>Quarter <input type="text" name="quarter" placeholder="2026-Q4" required></label></p>
+    {% for kpi in kpis %}
+    <p>
+        <label>{{ kpi.name }} ({{ kpi.metric }})
+            <input type="number" name="target_{{ kpi.id }}" min="0">
+        </label>
+    </p>
+    {% endfor %}
+    <button type="submit">Save targets</button>
+</form>
+{% else %}
+<p>This role has no KPIs yet. Add one below.</p>
+{% endif %}
+
+<h2>Current targets</h2>
+{% if targets %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>Quarter</th>
+        <th>KPI</th>
+        <th>Target</th>
+    </tr>
+    {% for target in targets %}
+    <tr>
+        <td>{{ target.year }}-Q{{ target.quarter }}</td>
+        <td>{{ target.kpi_name }}</td>
+        <td>{{ target.target_value }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No targets set.</p>
+{% endif %}
+
+<h2>Add KPI for {{ member.role_name }}</h2>
+<form method="post" action="{{ url_for('kpi.add_kpi', member_id=member.id) }}">
+    <label>Name <input type="text" name="name" required></label>
+    <label>Metric
+        <select name="metric_key">
+            {% for key in metric_keys %}
+            <option value="{{ key }}">{{ key }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Add KPI</button>
+</form>
+{% endblock %}

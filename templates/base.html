@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{% block title %}Brokerage{% endblock %}</title>
+</head>
+<body>
+    <nav>
+        <a href="{{ url_for('kpi.team') }}">Team</a> |
+        <a href="{{ url_for('kpi.add_member') }}">Add member</a>
+    </nav>
+    <hr>
+    {% block content %}{% endblock %}
+</body>
+</html>

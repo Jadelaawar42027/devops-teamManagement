@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Team{% endblock %}
+{% block content %}
+<h1>Team</h1>
+
+{% if members %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>Name</th>
+        <th>Email</th>
+        <th>Role</th>
+        <th></th>
+    </tr>
+    {% for member in members %}
+    <tr>
+        <td>{{ member.name }}</td>
+        <td>{{ member.email }}</td>
+        <td>{{ member.role_name }}</td>
+        <td><a href="{{ url_for('kpi.member_targets', member_id=member.id) }}">Targets</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No members yet.</p>
+{% endif %}
+
+<h2>Roles</h2>
+{% if roles %}
+<ul>
+    {% for role in roles %}
+    <li>{{ role.name }}</li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>No roles yet. Add one before adding members.</p>
+{% endif %}
+
+<form method="post" action="{{ url_for('kpi.add_role') }}">
+    <label>New role <input type="text" name="name" required></label>
+    <button type="submit">Add role</button>
+</form>
+{% endblock %}

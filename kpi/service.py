@@ -32,6 +32,40 @@ def list_members(conn):
     ).fetchall()
 
 
+def get_member(conn, member_id):
+    return conn.execute(
+        """
+        SELECT members.id, members.name, members.email, members.role_id,
+               roles.name AS role_name
+        FROM members
+        JOIN roles ON roles.id = members.role_id
+        WHERE members.id = ?
+        """,
+        (member_id,),
+    ).fetchone()
+
+
+def list_kpis(conn, role_id):
+    return conn.execute(
+        "SELECT id, name, metric FROM kpi_definitions WHERE role_id = ? ORDER BY name",
+        (role_id,),
+    ).fetchall()
+
+
+def list_targets(conn, member_id):
+    return conn.execute(
+        """
+        SELECT kpi_definitions.name AS kpi_name, kpi_targets.year,
+               kpi_targets.quarter, kpi_targets.target_value
+        FROM kpi_targets
+        JOIN kpi_definitions ON kpi_definitions.id = kpi_targets.kpi_id
+        WHERE kpi_targets.member_id = ?
+        ORDER BY kpi_targets.year DESC, kpi_targets.quarter DESC, kpi_definitions.name
+        """,
+        (member_id,),
+    ).fetchall()
+
+
 def create_kpi(conn, role_id, name, metric_key, description=None):
     if metric_key not in METRIC_KEYS:
         raise ValueError("metric_key must be one of: " + ", ".join(METRIC_KEYS))
