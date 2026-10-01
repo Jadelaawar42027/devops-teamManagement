@@ -13,9 +13,11 @@ CREATE TABLE IF NOT EXISTS members (
 
 CREATE TABLE IF NOT EXISTS kpi_definitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
+    role_id INTEGER NOT NULL REFERENCES roles(id),
+    name TEXT NOT NULL,
     metric TEXT NOT NULL,
-    description TEXT
+    description TEXT,
+    UNIQUE (role_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS kpi_targets (
