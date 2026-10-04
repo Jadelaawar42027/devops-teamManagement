@@ -4,6 +4,10 @@
 <h1>Add lead</h1>
 <p>The lead is assigned to a broker automatically when you save it.</p>
 
+{% if no_brokers %}
+<p><strong>Warning: leads won't be assigned until a member has the role "Broker".</strong></p>
+{% endif %}
+
 {% if error %}
 <p><strong>{{ error }}</strong></p>
 {% endif %}

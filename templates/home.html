@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Brokerage Team KPI & Lead Routing{% endblock %}
+{% block content %}
+<h1>Brokerage Team KPI & Lead Routing</h1>
+<ul>
+    <li><a href="{{ url_for('kpi.team') }}">Team</a></li>
+    <li><a href="{{ url_for('kpi.dashboard') }}">Dashboard</a></li>
+    <li><a href="{{ url_for('routing.leads') }}">Leads</a></li>
+    <li><a href="{{ url_for('routing.add_lead') }}">Add lead</a></li>
+    <li><a href="{{ url_for('routing.leaderboard') }}">Leaderboard</a></li>
+</ul>
+{% endblock %}

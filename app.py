@@ -1,6 +1,6 @@
 import os
 
-from flask import Flask
+from flask import Flask, render_template
 
 from db import init_db
 from kpi.routes import kpi_bp
@@ -8,7 +8,7 @@ from routing.routes import routing_bp
 from seed import seed_demo
 
 PORT = int(os.environ.get("PORT", "8000"))
-DATA_DIR = os.environ.get("DATA_DIR", "./data")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 
 
 def create_app():
@@ -22,7 +22,7 @@ def create_app():
 
     @app.route("/")
     def index():
-        return "<h1>Brokerage Team KPI & Lead Routing</h1><p>Coming soon.</p>"
+        return render_template("home.html")
 
     return app
 

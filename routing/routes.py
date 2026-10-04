@@ -43,7 +43,10 @@ def add_lead():
         except ValueError:
             error = "Source is required and score must be a whole number from 0 to 100."
         conn.close()
-    return render_template("lead_form.html", error=error)
+    conn = get_connection()
+    no_brokers = not active_broker_ids(conn)
+    conn.close()
+    return render_template("lead_form.html", error=error, no_brokers=no_brokers)
 
 
 @routing_bp.route("/leads/<int:lead_id>/outcome", methods=["GET", "POST"])

@@ -5,7 +5,7 @@ SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.s
 
 
 def get_db_path():
-    data_dir = os.environ.get("DATA_DIR", "./data")
+    data_dir = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
     return os.path.join(data_dir, "app.db")
 
 
