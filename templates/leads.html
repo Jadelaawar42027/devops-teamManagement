@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Leads{% endblock %}
+{% block content %}
+<h1>Leads</h1>
+
+{% if leads %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>#</th>
+        <th>Source</th>
+        <th>Score</th>
+        <th>Band</th>
+        <th>Assigned to</th>
+        <th>Furthest stage</th>
+        <th></th>
+    </tr>
+    {% for lead in leads %}
+    <tr>
+        <td>{{ lead.id }}</td>
+        <td>{{ lead.source }}</td>
+        <td>{{ lead.score }}</td>
+        <td>{{ lead.band }}</td>
+        <td>{% if lead.assigned_member_id %}Member #{{ lead.assigned_member_id }}{% else %}Unassigned{% endif %}</td>
+        <td>{{ lead.stage }}</td>
+        <td><a href="{{ url_for('routing.lead_outcome', lead_id=lead.id) }}">Record outcome</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No leads yet.</p>
+{% endif %}
+{% endblock %}

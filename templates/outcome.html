@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Lead #{{ lead.id }}{% endblock %}
+{% block content %}
+<h1>Lead #{{ lead.id }}</h1>
+<p>
+    Source: {{ lead.source }} |
+    Score: {{ lead.score }} ({{ band }}) |
+    {% if lead.assigned_member_id %}Assigned to member #{{ lead.assigned_member_id }}{% else %}Unassigned{% endif %}
+</p>
+
+{% if error %}
+<p><strong>{{ error }}</strong></p>
+{% endif %}
+
+<h2>Record outcome</h2>
+<form method="post">
+    <label>Stage
+        <select name="stage">
+            {% for stage in stages %}
+            <option value="{{ stage }}">{{ stage }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Record</button>
+</form>
+
+<h2>History</h2>
+{% if outcomes %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>Stage</th>
+        <th>Recorded at (UTC)</th>
+    </tr>
+    {% for outcome in outcomes %}
+    <tr>
+        <td>{{ outcome.outcome }}</td>
+        <td>{{ outcome.recorded_at }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No outcomes recorded.</p>
+{% endif %}
+{% endblock %}

@@ -160,3 +160,40 @@ def activity_counts(conn, member_id, quarter):
         if row["outcome"] in STAGE_METRICS:
             counts[STAGE_METRICS[row["outcome"]]] = row["total"]
     return counts
+
+
+def get_lead(conn, lead_id):
+    return conn.execute(
+        "SELECT id, source, score, assigned_member_id, created_at FROM leads WHERE id = ?",
+        (lead_id,),
+    ).fetchone()
+
+
+def list_outcomes(conn, lead_id):
+    return conn.execute(
+        "SELECT outcome, recorded_at FROM lead_outcomes WHERE lead_id = ? ORDER BY id",
+        (lead_id,),
+    ).fetchall()
+
+
+def list_leads(conn):
+    furthest = {}
+    for row in conn.execute("SELECT lead_id, outcome FROM lead_outcomes"):
+        current = furthest.get(row["lead_id"], "none")
+        if OUTCOME_POINTS[row["outcome"]] > OUTCOME_POINTS[current]:
+            furthest[row["lead_id"]] = row["outcome"]
+    leads = []
+    rows = conn.execute(
+        "SELECT id, source, score, assigned_member_id, created_at FROM leads ORDER BY id DESC"
+    ).fetchall()
+    for row in rows:
+        leads.append({
+            "id": row["id"],
+            "source": row["source"],
+            "score": row["score"],
+            "band": band_for_score(row["score"]),
+            "assigned_member_id": row["assigned_member_id"],
+            "created_at": row["created_at"],
+            "stage": furthest.get(row["id"], "none"),
+        })
+    return leads

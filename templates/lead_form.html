@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Add lead{% endblock %}
+{% block content %}
+<h1>Add lead</h1>
+<p>The lead is assigned to a broker automatically when you save it.</p>
+
+{% if error %}
+<p><strong>{{ error }}</strong></p>
+{% endif %}
+
+<form method="post">
+    <p><label>Source <input type="text" name="source" placeholder="website" required></label></p>
+    <p><label>Score (0-100) <input type="number" name="score" min="0" max="100" required></label></p>
+    <button type="submit">Add lead</button>
+</form>
+{% endblock %}

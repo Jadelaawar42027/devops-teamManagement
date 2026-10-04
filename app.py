@@ -4,6 +4,7 @@ from flask import Flask
 
 from db import init_db
 from kpi.routes import kpi_bp
+from routing.routes import routing_bp
 
 PORT = int(os.environ.get("PORT", "8000"))
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
@@ -14,6 +15,7 @@ def create_app():
     init_db()
     app = Flask(__name__)
     app.register_blueprint(kpi_bp)
+    app.register_blueprint(routing_bp)
 
     @app.route("/")
     def index():

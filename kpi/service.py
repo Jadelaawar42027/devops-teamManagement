@@ -34,6 +34,19 @@ def list_members(conn):
     ).fetchall()
 
 
+def active_broker_ids(conn):
+    rows = conn.execute(
+        """
+        SELECT members.id
+        FROM members
+        JOIN roles ON roles.id = members.role_id
+        WHERE members.active = 1 AND LOWER(roles.name) = 'broker'
+        ORDER BY members.id
+        """
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def get_member(conn, member_id):
     return conn.execute(
         """

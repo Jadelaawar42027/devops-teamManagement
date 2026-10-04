@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Broker leaderboard{% endblock %}
+{% block content %}
+<h1>Broker leaderboard</h1>
+
+{% if brokers %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>Rank</th>
+        <th>Broker</th>
+        <th>Score</th>
+        <th>Open leads</th>
+    </tr>
+    {% for broker in brokers %}
+    <tr>
+        <td>{{ loop.index }}</td>
+        <td>Member #{{ broker.member_id }}</td>
+        <td>{{ "%.2f"|format(broker.score) }}</td>
+        <td>{{ broker.open_leads }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No active brokers. Add a role called Broker and a member with that role on the team page.</p>
+{% endif %}
+{% endblock %}
