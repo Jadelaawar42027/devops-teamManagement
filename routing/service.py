@@ -28,7 +28,7 @@ def create_lead(conn, source, score):
 
 def assign_lead(conn, lead_id, member_id):
     cur = conn.execute(
-        "UPDATE leads SET assigned_member_id = ? WHERE id = ?",
+        "UPDATE leads SET assigned_member_id = ?, assigned_at = CURRENT_TIMESTAMP WHERE id = ?",
         (member_id, lead_id),
     )
     conn.commit()
@@ -78,3 +78,36 @@ def broker_score(conn, member_id, today):
             age_days = (today - date.fromisoformat(row["created_at"][:10])).days
             results[row["id"]] = (points, band_for_score(row["score"]), age_days)
     return score_from_results(list(results.values()))
+
+
+def open_lead_count(conn, member_id):
+    return conn.execute(
+        """
+        SELECT COUNT(*) FROM leads
+        WHERE assigned_member_id = ?
+          AND id NOT IN (SELECT lead_id FROM lead_outcomes WHERE outcome = 'closed')
+        """,
+        (member_id,),
+    ).fetchone()[0]
+
+
+def last_assigned_at(conn, member_id):
+    return conn.execute(
+        "SELECT MAX(assigned_at) FROM leads WHERE assigned_member_id = ?",
+        (member_id,),
+    ).fetchone()[0]
+
+
+def pick_next_broker(conn, band, broker_ids, today):
+    if not broker_ids:
+        return None
+
+    # min() picks the smallest tuple, so each rule is one position in it
+    def rank(member_id):
+        open_leads = open_lead_count(conn, member_id)
+        if band == "hot":
+            return (-broker_score(conn, member_id, today), open_leads, member_id)
+        # a broker who never got a lead sorts before any timestamp
+        return (last_assigned_at(conn, member_id) or "", open_leads, member_id)
+
+    return min(broker_ids, key=rank)

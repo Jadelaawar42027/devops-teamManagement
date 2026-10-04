@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS leads (
     source TEXT NOT NULL,
     score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
     assigned_member_id INTEGER,
+    assigned_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
