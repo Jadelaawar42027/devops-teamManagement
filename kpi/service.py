@@ -1,3 +1,5 @@
+from routing.service import activity_counts
+
 METRIC_KEYS = ["leads_assigned", "showings_booked", "showings_performed", "deals_closed"]
 
 
@@ -96,3 +98,33 @@ def set_target(conn, member_id, kpi_id, quarter, target_value):
         (kpi_id, member_id, year, q, target_value),
     )
     conn.commit()
+
+
+def kpi_progress(conn, member_id, quarter):
+    year, q = parse_quarter(quarter)
+    targets = conn.execute(
+        """
+        SELECT kpi_definitions.name, kpi_definitions.metric, kpi_targets.target_value
+        FROM kpi_targets
+        JOIN kpi_definitions ON kpi_definitions.id = kpi_targets.kpi_id
+        WHERE kpi_targets.member_id = ? AND kpi_targets.year = ? AND kpi_targets.quarter = ?
+        ORDER BY kpi_definitions.name
+        """,
+        (member_id, year, q),
+    ).fetchall()
+    counts = activity_counts(conn, member_id, quarter)
+    progress = []
+    for row in targets:
+        target = row["target_value"]
+        actual = counts[row["metric"]]
+        percent = None
+        if target > 0:
+            percent = round(actual / target * 100)
+        progress.append({
+            "kpi_name": row["name"],
+            "metric": row["metric"],
+            "target": target,
+            "actual": actual,
+            "percent": percent,
+        })
+    return progress
