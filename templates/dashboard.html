@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}KPI dashboard{% endblock %}
+{% block content %}
+<h1>KPI dashboard</h1>
+
+<form method="get">
+    <label>Quarter <input type="text" name="quarter" value="{{ quarter }}" placeholder="2026-Q4"></label>
+    <button type="submit">Show</button>
+</form>
+
+{% if error %}
+<p><strong>{{ error }}</strong></p>
+{% endif %}
+
+{% for row in rows %}
+<h2>{{ row.member.name }} ({{ row.member.role_name }})</h2>
+{% if row.progress %}
+<table border="1" cellpadding="4">
+    <tr>
+        <th>KPI</th>
+        <th>Target</th>
+        <th>Actual</th>
+        <th>Reached</th>
+    </tr>
+    {% for kpi in row.progress %}
+    <tr>
+        <td>{{ kpi.kpi_name }}</td>
+        <td>{{ kpi.target }}</td>
+        <td>{{ kpi.actual }}</td>
+        <td>{% if kpi.percent is none %}-{% else %}{{ kpi.percent }}%{% endif %}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No targets set for {{ quarter }}.
+    <a href="{{ url_for('kpi.member_targets', member_id=row.member.id) }}">Set targets</a></p>
+{% endif %}
+{% else %}
+{% if not error %}
+<p>No members yet.</p>
+{% endif %}
+{% endfor %}
+{% endblock %}

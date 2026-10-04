@@ -5,6 +5,11 @@ OUTCOME_POINTS = {"none": 0, "showing_booked": 1, "showing_performed": 2, "close
 EXPECTED_POINTS = {"hot": 2.5, "warm": 1.5, "cold": 0.5}
 SCORE_WINDOW_DAYS = 90
 HALF_LIFE_DAYS = 30
+STAGE_METRICS = {
+    "showing_booked": "showings_booked",
+    "showing_performed": "showings_performed",
+    "closed": "deals_closed",
+}
 
 
 def band_for_score(score):
@@ -111,3 +116,47 @@ def pick_next_broker(conn, band, broker_ids, today):
         return (last_assigned_at(conn, member_id) or "", open_leads, member_id)
 
     return min(broker_ids, key=rank)
+
+
+def quarter_dates(quarter):
+    year, q = quarter.split("-Q")
+    year, q = int(year), int(q)
+    start = date(year, 3 * q - 2, 1)
+    if q == 4:
+        end = date(year + 1, 1, 1)
+    else:
+        end = date(year, 3 * q + 1, 1)
+    return start.isoformat(), end.isoformat()
+
+
+def activity_counts(conn, member_id, quarter):
+    start, end = quarter_dates(quarter)
+    counts = {
+        "leads_assigned": 0,
+        "showings_booked": 0,
+        "showings_performed": 0,
+        "deals_closed": 0,
+    }
+    counts["leads_assigned"] = conn.execute(
+        """
+        SELECT COUNT(*) FROM leads
+        WHERE assigned_member_id = ? AND assigned_at >= ? AND assigned_at < ?
+        """,
+        (member_id, start, end),
+    ).fetchone()[0]
+    # DISTINCT so an outcome recorded twice for the same lead counts once
+    rows = conn.execute(
+        """
+        SELECT lead_outcomes.outcome, COUNT(DISTINCT leads.id) AS total
+        FROM lead_outcomes
+        JOIN leads ON leads.id = lead_outcomes.lead_id
+        WHERE leads.assigned_member_id = ?
+          AND lead_outcomes.recorded_at >= ? AND lead_outcomes.recorded_at < ?
+        GROUP BY lead_outcomes.outcome
+        """,
+        (member_id, start, end),
+    ).fetchall()
+    for row in rows:
+        if row["outcome"] in STAGE_METRICS:
+            counts[STAGE_METRICS[row["outcome"]]] = row["total"]
+    return counts

@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import date
 
 from flask import Blueprint, abort, redirect, render_template, request, url_for
 
@@ -15,6 +16,25 @@ def team():
     roles = service.list_roles(conn)
     conn.close()
     return render_template("team.html", members=members, roles=roles)
+
+
+@kpi_bp.route("/dashboard")
+def dashboard():
+    today = date.today()
+    current = str(today.year) + "-Q" + str((today.month - 1) // 3 + 1)
+    quarter = request.args.get("quarter", "").strip() or current
+    conn = get_connection()
+    error = None
+    rows = []
+    try:
+        for member in service.list_members(conn):
+            progress = service.kpi_progress(conn, member["id"], quarter)
+            rows.append({"member": member, "progress": progress})
+    except ValueError:
+        error = "Quarter must look like 2026-Q4."
+        rows = []
+    conn.close()
+    return render_template("dashboard.html", quarter=quarter, rows=rows, error=error)
 
 
 @kpi_bp.route("/roles", methods=["POST"])
