@@ -32,10 +32,10 @@ CREATE TABLE IF NOT EXISTS kpi_targets (
 
 CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT,
+    source TEXT NOT NULL,
     score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
     assigned_member_id INTEGER,
+    assigned_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
