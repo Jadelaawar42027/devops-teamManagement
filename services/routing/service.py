@@ -1,4 +1,6 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+
+from db import fetch_all, fetch_one, insert_returning_id
 
 STAGES = ["none", "showing_booked", "showing_performed", "closed"]
 OUTCOME_POINTS = {"none": 0, "showing_booked": 1, "showing_performed": 2, "closed": 4}
@@ -10,6 +12,7 @@ STAGE_METRICS = {
     "showing_performed": "showings_performed",
     "closed": "deals_closed",
 }
+EMPTY_COUNTS = {"leads_assigned": 0, "showings_booked": 0, "showings_performed": 0, "deals_closed": 0}
 
 
 def band_for_score(score):
@@ -23,17 +26,17 @@ def band_for_score(score):
 def create_lead(conn, source, score):
     if score < 0 or score > 100:
         raise ValueError("score must be between 0 and 100")
-    cur = conn.execute(
-        "INSERT INTO leads (source, score) VALUES (?, ?)",
+    return insert_returning_id(
+        conn,
+        "INSERT INTO leads (source, score) OUTPUT INSERTED.id VALUES (%s, %s)",
         (source, score),
     )
-    conn.commit()
-    return cur.lastrowid
 
 
 def assign_lead(conn, lead_id, member_id):
-    cur = conn.execute(
-        "UPDATE leads SET assigned_member_id = ?, assigned_at = CURRENT_TIMESTAMP WHERE id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE leads SET assigned_member_id = %s, assigned_at = SYSUTCDATETIME() WHERE id = %s",
         (member_id, lead_id),
     )
     conn.commit()
@@ -44,15 +47,13 @@ def assign_lead(conn, lead_id, member_id):
 def record_outcome(conn, lead_id, stage):
     if stage not in STAGES:
         raise ValueError("stage must be one of: " + ", ".join(STAGES))
-    lead = conn.execute("SELECT id FROM leads WHERE id = ?", (lead_id,)).fetchone()
-    if lead is None:
-        raise ValueError("lead not found")
-    cur = conn.execute(
-        "INSERT INTO lead_outcomes (lead_id, outcome) VALUES (?, ?)",
+    if fetch_one(conn, "SELECT id FROM leads WHERE id = %s", (lead_id,)) is None:
+        raise LookupError("lead not found")
+    return insert_returning_id(
+        conn,
+        "INSERT INTO lead_outcomes (lead_id, outcome) OUTPUT INSERTED.id VALUES (%s, %s)",
         (lead_id, stage),
     )
-    conn.commit()
-    return cur.lastrowid
 
 
 def score_from_results(results):
@@ -65,42 +66,43 @@ def score_from_results(results):
 
 def broker_score(conn, member_id, today):
     cutoff = today - timedelta(days=SCORE_WINDOW_DAYS)
-    rows = conn.execute(
+    rows = fetch_all(
+        conn,
         """
         SELECT leads.id, leads.score, leads.created_at, lead_outcomes.outcome
         FROM leads
         LEFT JOIN lead_outcomes ON lead_outcomes.lead_id = leads.id
-        WHERE leads.assigned_member_id = ?
-          AND date(leads.created_at) BETWEEN ? AND ?
+        WHERE leads.assigned_member_id = %s
+          AND CAST(leads.created_at AS DATE) BETWEEN %s AND %s
         """,
-        (member_id, cutoff.isoformat(), today.isoformat()),
-    ).fetchall()
+        (member_id, cutoff, today),
+    )
     # one row per outcome, so keep only the furthest outcome for each lead
     results = {}
     for row in rows:
         points = OUTCOME_POINTS.get(row["outcome"], 0)
         if row["id"] not in results or points > results[row["id"]][0]:
-            age_days = (today - date.fromisoformat(row["created_at"][:10])).days
+            age_days = (today - row["created_at"].date()).days
             results[row["id"]] = (points, band_for_score(row["score"]), age_days)
     return score_from_results(list(results.values()))
 
 
 def open_lead_count(conn, member_id):
-    return conn.execute(
+    return fetch_one(
+        conn,
         """
-        SELECT COUNT(*) FROM leads
-        WHERE assigned_member_id = ?
+        SELECT COUNT(*) AS n FROM leads
+        WHERE assigned_member_id = %s
           AND id NOT IN (SELECT lead_id FROM lead_outcomes WHERE outcome = 'closed')
         """,
         (member_id,),
-    ).fetchone()[0]
+    )["n"]
 
 
 def last_assigned_at(conn, member_id):
-    return conn.execute(
-        "SELECT MAX(assigned_at) FROM leads WHERE assigned_member_id = ?",
-        (member_id,),
-    ).fetchone()[0]
+    return fetch_one(
+        conn, "SELECT MAX(assigned_at) AS last FROM leads WHERE assigned_member_id = %s", (member_id,)
+    )["last"]
 
 
 def pick_next_broker(conn, band, broker_ids, today):
@@ -112,88 +114,104 @@ def pick_next_broker(conn, band, broker_ids, today):
         open_leads = open_lead_count(conn, member_id)
         if band == "hot":
             return (-broker_score(conn, member_id, today), open_leads, member_id)
-        # a broker who never got a lead sorts before any timestamp
-        return (last_assigned_at(conn, member_id) or "", open_leads, member_id)
+        # a broker who never got a lead sorts before any timestamp (datetime.min, not "",
+        # because SQL Server returns datetimes, and a str cannot be compared with one)
+        return (last_assigned_at(conn, member_id) or datetime.min, open_leads, member_id)
 
     return min(broker_ids, key=rank)
 
 
 def quarter_dates(quarter):
-    year, q = quarter.split("-Q")
-    year, q = int(year), int(q)
+    parts = quarter.split("-Q")
+    if len(parts) != 2 or len(parts[0]) != 4 or not parts[0].isdigit() or parts[1] not in ("1", "2", "3", "4"):
+        raise ValueError("quarter must look like 2026-Q4")
+    year, q = int(parts[0]), int(parts[1])
     start = date(year, 3 * q - 2, 1)
-    if q == 4:
-        end = date(year + 1, 1, 1)
-    else:
-        end = date(year, 3 * q + 1, 1)
-    return start.isoformat(), end.isoformat()
+    end = date(year + 1, 1, 1) if q == 4 else date(year, 3 * q + 1, 1)
+    return start, end
 
 
-def activity_counts(conn, member_id, quarter):
+def activity_counts_bulk(conn, member_ids, quarter):
+    """KPI actuals for many members at once; replaces ADR-2's one-call-per-member activity_counts()."""
     start, end = quarter_dates(quarter)
-    counts = {
-        "leads_assigned": 0,
-        "showings_booked": 0,
-        "showings_performed": 0,
-        "deals_closed": 0,
-    }
-    counts["leads_assigned"] = conn.execute(
-        """
-        SELECT COUNT(*) FROM leads
-        WHERE assigned_member_id = ? AND assigned_at >= ? AND assigned_at < ?
+    counts = {member_id: dict(EMPTY_COUNTS) for member_id in member_ids}
+    if not member_ids:
+        return counts
+    placeholders = ", ".join(["%s"] * len(member_ids))
+    for row in fetch_all(
+        conn,
+        f"""
+        SELECT assigned_member_id AS member_id, COUNT(*) AS total FROM leads
+        WHERE assigned_member_id IN ({placeholders}) AND assigned_at >= %s AND assigned_at < %s
+        GROUP BY assigned_member_id
         """,
-        (member_id, start, end),
-    ).fetchone()[0]
+        (*member_ids, start, end),
+    ):
+        counts[row["member_id"]]["leads_assigned"] = row["total"]
     # DISTINCT so an outcome recorded twice for the same lead counts once
-    rows = conn.execute(
-        """
-        SELECT lead_outcomes.outcome, COUNT(DISTINCT leads.id) AS total
+    for row in fetch_all(
+        conn,
+        f"""
+        SELECT leads.assigned_member_id AS member_id, lead_outcomes.outcome,
+               COUNT(DISTINCT leads.id) AS total
         FROM lead_outcomes
         JOIN leads ON leads.id = lead_outcomes.lead_id
-        WHERE leads.assigned_member_id = ?
-          AND lead_outcomes.recorded_at >= ? AND lead_outcomes.recorded_at < ?
-        GROUP BY lead_outcomes.outcome
+        WHERE leads.assigned_member_id IN ({placeholders})
+          AND lead_outcomes.recorded_at >= %s AND lead_outcomes.recorded_at < %s
+        GROUP BY leads.assigned_member_id, lead_outcomes.outcome
         """,
-        (member_id, start, end),
-    ).fetchall()
-    for row in rows:
+        (*member_ids, start, end),
+    ):
         if row["outcome"] in STAGE_METRICS:
-            counts[STAGE_METRICS[row["outcome"]]] = row["total"]
+            counts[row["member_id"]][STAGE_METRICS[row["outcome"]]] = row["total"]
     return counts
 
 
+LEAD_COLUMNS = "id, source, score, assigned_member_id, assigned_at, created_at"
+
+
 def get_lead(conn, lead_id):
-    return conn.execute(
-        "SELECT id, source, score, assigned_member_id, created_at FROM leads WHERE id = ?",
-        (lead_id,),
-    ).fetchone()
+    return fetch_one(conn, f"SELECT {LEAD_COLUMNS} FROM leads WHERE id = %s", (lead_id,))
 
 
 def list_outcomes(conn, lead_id):
-    return conn.execute(
-        "SELECT outcome, recorded_at FROM lead_outcomes WHERE lead_id = ? ORDER BY id",
-        (lead_id,),
-    ).fetchall()
+    return fetch_all(
+        conn, "SELECT outcome, recorded_at FROM lead_outcomes WHERE lead_id = %s ORDER BY id", (lead_id,)
+    )
 
 
-def list_leads(conn):
+def furthest_stages(conn):
     furthest = {}
-    for row in conn.execute("SELECT lead_id, outcome FROM lead_outcomes"):
+    for row in fetch_all(conn, "SELECT lead_id, outcome FROM lead_outcomes"):
         current = furthest.get(row["lead_id"], "none")
         if OUTCOME_POINTS[row["outcome"]] > OUTCOME_POINTS[current]:
             furthest[row["lead_id"]] = row["outcome"]
+    return furthest
+
+
+def list_leads(conn):
+    furthest = furthest_stages(conn)
     leads = []
-    rows = conn.execute(
-        "SELECT id, source, score, assigned_member_id, created_at FROM leads ORDER BY id DESC"
-    ).fetchall()
-    for row in rows:
-        leads.append({
-            "id": row["id"],
-            "source": row["source"],
-            "score": row["score"],
-            "band": band_for_score(row["score"]),
-            "assigned_member_id": row["assigned_member_id"],
-            "created_at": row["created_at"],
-            "stage": furthest.get(row["id"], "none"),
-        })
+    for row in fetch_all(conn, f"SELECT {LEAD_COLUMNS} FROM leads ORDER BY id DESC"):
+        lead = dict(row)
+        lead["band"] = band_for_score(row["score"])
+        lead["stage"] = furthest.get(row["id"], "none")
+        leads.append(lead)
     return leads
+
+
+def assigned_member_ids(conn):
+    rows = fetch_all(conn, "SELECT DISTINCT assigned_member_id AS id FROM leads WHERE assigned_member_id IS NOT NULL")
+    return sorted(row["id"] for row in rows)
+
+
+def leaderboard(conn, broker_ids, today):
+    rows = [
+        {
+            "member_id": member_id,
+            "score": round(broker_score(conn, member_id, today), 2),
+            "open_leads": open_lead_count(conn, member_id),
+        }
+        for member_id in broker_ids
+    ]
+    return sorted(rows, key=lambda r: (-r["score"], r["open_leads"], r["member_id"]))
