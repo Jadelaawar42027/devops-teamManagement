@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#0d1a22">
+  <title>Brokerage Desk</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230d1a22'/%3E%3Cpath d='M9 22h14l-3 4h-8z' fill='%230b8a83'/%3E%3Cpath d='M16 6v14h-7z' fill='%23e9eef0'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="wordmark" href="#/dashboard">
+        <svg class="wordmark-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M9 22h14l-3 4h-8z"/><path class="sail" d="M16 6v14h-7z"/></svg>
+        <span translate="no">Brokerage Desk</span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="#/team" data-nav="team">Team</a>
+        <a href="#/leads" data-nav="leads">Leads</a>
+        <a href="#/leads/new" data-nav="lead-new">Add lead</a>
+        <a href="#/leaderboard" data-nav="leaderboard">Leaderboard</a>
+      </nav>
+      <section class="status" aria-label="Service status">
+        <p class="status-title">Services</p>
+        <ul class="status-list" id="service-status">
+          <li data-service="kpi"><span class="dot" aria-hidden="true"></span><span class="status-name">KPI</span><span class="status-text">Checking…</span></li>
+          <li data-service="routing"><span class="dot" aria-hidden="true"></span><span class="status-name">Routing</span><span class="status-text">Checking…</span></li>
+        </ul>
+      </section>
+    </aside>
+    <main id="main" class="main" tabindex="-1">
+      <noscript><div class="banner banner-error"><div class="banner-body"><p class="banner-title">JavaScript is off</p><p>This app needs JavaScript to load data from the KPI and routing services.</p></div></div></noscript>
+    </main>
+  </div>
+</body>
+</html>
