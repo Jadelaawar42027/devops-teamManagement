@@ -100,9 +100,8 @@ def open_lead_count(conn, member_id):
 
 
 def last_assigned_at(conn, member_id):
-    return fetch_one(
-        conn, "SELECT MAX(assigned_at) AS last FROM leads WHERE assigned_member_id = %s", (member_id,)
-    )["last"]
+    row = fetch_one(conn, "SELECT MAX(assigned_at) AS last FROM leads WHERE assigned_member_id = %s", (member_id,))
+    return row["last"]
 
 
 def pick_next_broker(conn, band, broker_ids, today):
@@ -175,9 +174,7 @@ def get_lead(conn, lead_id):
 
 
 def list_outcomes(conn, lead_id):
-    return fetch_all(
-        conn, "SELECT outcome, recorded_at FROM lead_outcomes WHERE lead_id = %s ORDER BY id", (lead_id,)
-    )
+    return fetch_all(conn, "SELECT outcome, recorded_at FROM lead_outcomes WHERE lead_id = %s ORDER BY id", (lead_id,))
 
 
 def furthest_stages(conn):

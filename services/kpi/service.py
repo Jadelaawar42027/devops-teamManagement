@@ -143,13 +143,15 @@ def kpi_progress(targets, counts):
         percent = None
         if actual is not None and target > 0:
             percent = round(actual / target * 100)
-        progress.append({
-            "kpi_name": row["name"],
-            "metric": row["metric"],
-            "target": target,
-            "actual": actual,
-            "percent": percent,
-        })
+        progress.append(
+            {
+                "kpi_name": row["name"],
+                "metric": row["metric"],
+                "target": target,
+                "actual": actual,
+                "percent": percent,
+            }
+        )
     return progress
 
 
