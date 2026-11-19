@@ -1,0 +1,349 @@
+openapi: 3.0.3
+info:
+  title: Routing service
+  version: 1.0.0
+  description: |
+    Leads, their outcomes, broker scoring, automatic assignment and the leaderboard, plus the
+    activity counts the KPI service uses as actuals.
+
+    Every response is JSON. Errors have the shape {"error": "..."}. Any endpoint that reads the
+    database answers 500 {"error": "internal error"} if the database cannot be reached after the
+    connection retries. Behind the proxy the paths are prefixed with /api/routing.
+
+    Called by the KPI service: GET /activity.
+    Calls the KPI service: GET /brokers/active (from POST /leads and GET /leaderboard).
+    Member ids here are KPI member ids, stored without a foreign key (ADR-3, ADR-7).
+servers:
+  - url: /api/routing
+    description: Through the nginx proxy (local compose and the Azure VM)
+  - url: http://localhost:8002
+    description: The container directly, local compose only
+tags:
+  - name: health
+  - name: leads
+  - name: leaderboard
+  - name: seam
+    description: Endpoints the KPI service calls
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health of this service and its own database
+      description: 200 when the service can read and write its own database (a write rolled back
+        inside a transaction). Does not depend on the KPI service.
+      operationId: getHealth
+      responses:
+        "200":
+          description: The database is readable and writable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok, db: ok, version: 3f2c1ab }
+        "503":
+          description: The database cannot be reached or written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: error, db: unavailable, version: 3f2c1ab }
+
+  /leads:
+    get:
+      tags: [leads]
+      summary: All leads, newest first, with band and furthest stage
+      operationId: listLeads
+      responses:
+        "200":
+          description: The leads
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [leads]
+                properties:
+                  leads:
+                    type: array
+                    items: { $ref: "#/components/schemas/LeadListItem" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [leads]
+      summary: Create a lead and assign it to a broker
+      description: |
+        The lead is saved first. Then routing asks the KPI service for the active brokers
+        (GET /brokers/active, timeout KPI_TIMEOUT_S) and picks one: hot leads go to the
+        highest-scoring broker, warm and cold leads to the broker assigned least recently.
+        If KPI is unavailable the lead stays saved without a broker (assignment "skipped"),
+        and if there are no active brokers, assignment is "no_brokers". Both still answer 201.
+      operationId: createLead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, score]
+              properties:
+                source: { type: string, description: Trimmed; must not be empty }
+                score:
+                  description: Whole number from 0 to 100 (a string holding one is accepted)
+                  oneOf:
+                    - type: integer
+                      minimum: 0
+                      maximum: 100
+                    - type: string
+      responses:
+        "201":
+          description: Saved; assigned if a broker could be chosen
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LeadCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /leads/{lead_id}:
+    parameters:
+      - $ref: "#/components/parameters/LeadId"
+    get:
+      tags: [leads]
+      summary: One lead with its band and outcome history
+      operationId: getLead
+      responses:
+        "200":
+          description: The lead
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LeadDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /leads/{lead_id}/outcomes:
+    parameters:
+      - $ref: "#/components/parameters/LeadId"
+    post:
+      tags: [leads]
+      summary: Record an outcome for a lead
+      operationId: recordOutcome
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage]
+              properties:
+                stage: { $ref: "#/components/schemas/Stage" }
+      responses:
+        "201":
+          description: Recorded; the lead's whole outcome history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outcomes]
+                properties:
+                  outcomes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Outcome" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /leaderboard:
+    get:
+      tags: [leaderboard]
+      summary: Brokers ranked by score, then fewest open leads
+      description: |
+        Ranks the active brokers from the KPI service. If KPI is unavailable, it ranks every
+        member who has ever been assigned a lead instead (which may include inactive ones), and
+        notice says so. Names are not included: the UI joins them from KPI's GET /members.
+      operationId: getLeaderboard
+      responses:
+        "200":
+          description: The ranking
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [brokers, notice]
+                properties:
+                  brokers:
+                    type: array
+                    items: { $ref: "#/components/schemas/LeaderboardRow" }
+                  notice:
+                    type: string
+                    nullable: true
+                    example: "KPI service unavailable: showing every member with leads, including any who are inactive."
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /activity:
+    get:
+      tags: [seam]
+      summary: KPI actuals for many members in one call
+      description: |
+        Called by the KPI service's GET /dashboard. A lead counts in the quarter it was
+        assigned, an outcome in the quarter it was recorded, and an outcome recorded twice for
+        the same lead counts once. Every requested member is in the answer, with zeros if they
+        had no activity.
+      operationId: getActivity
+      parameters:
+        - name: quarter
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Quarter" }
+        - name: member_ids
+          in: query
+          required: false
+          description: Comma-separated KPI member ids, at most 200. Missing or empty gives an empty members object.
+          schema: { type: string, pattern: '^(\d+(,\d+)*)?$' }
+          example: "1,2,3"
+      responses:
+        "200":
+          description: Counts per member id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [quarter, members]
+                properties:
+                  quarter: { $ref: "#/components/schemas/Quarter" }
+                  members:
+                    type: object
+                    description: Keyed by member id as a string
+                    additionalProperties: { $ref: "#/components/schemas/ActivityCounts" }
+              example:
+                quarter: 2026-Q4
+                members:
+                  "1": { leads_assigned: 9, showings_booked: 5, showings_performed: 3, deals_closed: 1 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  parameters:
+    LeadId:
+      name: lead_id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+
+  responses:
+    BadRequest:
+      description: The input is invalid; error says why
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such lead
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: lead not found }
+    InternalError:
+      description: Unexpected error, e.g. the database is unreachable; details only in the log
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: internal error }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Health:
+      type: object
+      required: [status, db, version]
+      properties:
+        status: { type: string, enum: [ok, error] }
+        db: { type: string, enum: [ok, unavailable] }
+        version: { type: string, description: "The git commit SHA the image was built from (GIT_SHA), or dev" }
+
+    Quarter:
+      type: string
+      pattern: '^\d{4}-Q[1-4]$'
+      example: 2026-Q4
+
+    Band:
+      type: string
+      description: hot from score 70, warm from 40, cold below
+      enum: [hot, warm, cold]
+
+    Stage:
+      type: string
+      enum: [none, showing_booked, showing_performed, closed]
+
+    Lead:
+      type: object
+      required: [id, source, score, assigned_member_id, assigned_at, created_at]
+      properties:
+        id: { type: integer }
+        source: { type: string }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        assigned_member_id:
+          type: integer
+          nullable: true
+          description: A KPI member id; null while unassigned
+        assigned_at: { type: string, format: date-time, nullable: true, example: "2026-11-19T10:15:00Z" }
+        created_at: { type: string, format: date-time, example: "2026-11-19T10:15:00Z" }
+
+    LeadListItem:
+      allOf:
+        - $ref: "#/components/schemas/Lead"
+        - type: object
+          required: [band, stage]
+          properties:
+            band: { $ref: "#/components/schemas/Band" }
+            stage:
+              allOf:
+                - $ref: "#/components/schemas/Stage"
+              description: The furthest stage reached so far
+
+    LeadDetail:
+      allOf:
+        - $ref: "#/components/schemas/Lead"
+        - type: object
+          required: [band, outcomes]
+          properties:
+            band: { $ref: "#/components/schemas/Band" }
+            outcomes:
+              type: array
+              items: { $ref: "#/components/schemas/Outcome" }
+
+    LeadCreated:
+      type: object
+      required: [lead, band, assignment, notice]
+      properties:
+        lead: { $ref: "#/components/schemas/Lead" }
+        band: { $ref: "#/components/schemas/Band" }
+        assignment:
+          type: string
+          enum: [assigned, skipped, no_brokers]
+          description: skipped when the KPI service was unavailable; no_brokers when KPI has no active broker
+        notice:
+          type: string
+          nullable: true
+          example: "KPI service unavailable: lead saved without a broker."
+
+    Outcome:
+      type: object
+      required: [outcome, recorded_at]
+      properties:
+        outcome: { $ref: "#/components/schemas/Stage" }
+        recorded_at: { type: string, format: date-time }
+
+    LeaderboardRow:
+      type: object
+      required: [member_id, score, open_leads]
+      properties:
+        member_id: { type: integer }
+        score: { type: number, description: "Recency-weighted outcome score over the last 90 days, rounded to 2 decimals" }
+        open_leads: { type: integer }
+
+    ActivityCounts:
+      type: object
+      required: [leads_assigned, showings_booked, showings_performed, deals_closed]
+      properties:
+        leads_assigned: { type: integer }
+        showings_booked: { type: integer }
+        showings_performed: { type: integer }
+        deals_closed: { type: integer }

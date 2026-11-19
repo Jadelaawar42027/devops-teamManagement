@@ -1,0 +1,463 @@
+openapi: 3.0.3
+info:
+  title: KPI service
+  version: 1.0.0
+  description: |
+    Team members, their roles, KPI definitions and quarterly targets, and the dashboard that
+    compares targets with the actuals counted by the routing service.
+
+    Every response is JSON. Errors have the shape {"error": "..."}. Any endpoint that reads the
+    database answers 500 {"error": "internal error"} if the database cannot be reached after the
+    connection retries. Behind the proxy the paths are prefixed with /api/kpi.
+
+    Called by the routing service: GET /brokers/active.
+    Calls the routing service: GET /activity (from GET /dashboard).
+servers:
+  - url: /api/kpi
+    description: Through the nginx proxy (local compose and the Azure VM)
+  - url: http://localhost:8001
+    description: The container directly, local compose only
+tags:
+  - name: health
+  - name: members
+  - name: kpis
+  - name: dashboard
+  - name: seam
+    description: Endpoints the routing service calls
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health of this service and its own database
+      description: 200 when the service can read and write its own database (a write rolled back
+        inside a transaction). Does not depend on the routing service.
+      operationId: getHealth
+      responses:
+        "200":
+          description: The database is readable and writable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok, db: ok, version: 3f2c1ab }
+        "503":
+          description: The database cannot be reached or written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: error, db: unavailable, version: 3f2c1ab }
+
+  /roles:
+    get:
+      tags: [members]
+      summary: List roles, by name
+      operationId: listRoles
+      responses:
+        "200":
+          description: All roles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [roles]
+                properties:
+                  roles:
+                    type: array
+                    items: { $ref: "#/components/schemas/Role" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [members]
+      summary: Create a role
+      operationId: createRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: Trimmed; must not be empty }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Role" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /members:
+    get:
+      tags: [members]
+      summary: List members (active and inactive), by name
+      operationId: listMembers
+      responses:
+        "200":
+          description: All members
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items: { $ref: "#/components/schemas/Member" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [members]
+      summary: Add a member
+      operationId: createMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, role_id]
+              properties:
+                name: { type: string }
+                email: { type: string, description: Must contain @; unique }
+                role_id:
+                  description: A number, or a string holding one
+                  oneOf:
+                    - type: integer
+                    - type: string
+      responses:
+        "201":
+          description: Created; the new member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: The email is already used, or the role does not exist
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /members/{member_id}:
+    parameters:
+      - $ref: "#/components/parameters/MemberId"
+    get:
+      tags: [members]
+      summary: One member
+      operationId: getMember
+      responses:
+        "200":
+          description: The member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /members/{member_id}/deactivate:
+    parameters:
+      - $ref: "#/components/parameters/MemberId"
+    post:
+      tags: [members]
+      summary: Deactivate a member
+      description: Members are never deleted, because routing keeps their id on leads (ADR-3).
+        An inactive broker gets no new leads.
+      operationId: deactivateMember
+      responses:
+        "200":
+          description: The member, now with active 0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /brokers/active:
+    get:
+      tags: [seam]
+      summary: Ids of the members who can receive leads
+      description: Active members whose role is named "Broker" (any case), by id. Called by the
+        routing service when it assigns a new lead and for the leaderboard.
+      operationId: listActiveBrokers
+      responses:
+        "200":
+          description: The ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [broker_ids]
+                properties:
+                  broker_ids:
+                    type: array
+                    items: { type: integer }
+              example: { broker_ids: [1, 2, 3] }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /members/{member_id}/kpis:
+    parameters:
+      - $ref: "#/components/parameters/MemberId"
+    get:
+      tags: [kpis]
+      summary: KPI definitions of the member's role
+      operationId: listMemberKpis
+      responses:
+        "200":
+          description: The role's KPIs, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kpis]
+                properties:
+                  kpis:
+                    type: array
+                    items: { $ref: "#/components/schemas/Kpi" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [kpis]
+      summary: Add a KPI definition to the member's role
+      operationId: createKpi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, metric]
+              properties:
+                name: { type: string }
+                metric: { $ref: "#/components/schemas/Metric" }
+                description: { type: string, nullable: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, role_id, name, metric]
+                properties:
+                  id: { type: integer }
+                  role_id: { type: integer }
+                  name: { type: string }
+                  metric: { $ref: "#/components/schemas/Metric" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The role already has a KPI with that name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /members/{member_id}/targets:
+    parameters:
+      - $ref: "#/components/parameters/MemberId"
+    get:
+      tags: [kpis]
+      summary: All targets of a member, newest quarter first
+      operationId: listTargets
+      responses:
+        "200":
+          description: The targets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TargetList" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    put:
+      tags: [kpis]
+      summary: Set one target (insert, or update the existing one for that KPI and quarter)
+      operationId: setTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kpi_id, target_value, quarter]
+              properties:
+                kpi_id: { type: integer }
+                target_value: { type: integer, minimum: 0 }
+                quarter: { $ref: "#/components/schemas/Quarter" }
+      responses:
+        "200":
+          description: Saved; all targets of the member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TargetList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: The member or the KPI does not exist
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /dashboard:
+    get:
+      tags: [dashboard]
+      summary: Every member's KPI targets for a quarter, with actuals from the routing service
+      description: |
+        Reads the targets from this service's database, then makes one GET /activity call to
+        the routing service for every member who has a target (timeout ROUTING_TIMEOUT_S).
+        If routing does not answer 200 in time, the response is still 200: activity_available
+        is false, notice explains why, and every actual and percent is null.
+      operationId: getDashboard
+      parameters:
+        - name: quarter
+          in: query
+          required: false
+          description: Defaults to the current quarter (UTC)
+          schema: { $ref: "#/components/schemas/Quarter" }
+      responses:
+        "200":
+          description: The dashboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Dashboard" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  parameters:
+    MemberId:
+      name: member_id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+
+  responses:
+    BadRequest:
+      description: The input is invalid; error says why
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such member
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: member not found }
+    Conflict:
+      description: Breaks a uniqueness rule
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InternalError:
+      description: Unexpected error, e.g. the database is unreachable; details only in the log
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: internal error }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Health:
+      type: object
+      required: [status, db, version]
+      properties:
+        status: { type: string, enum: [ok, error] }
+        db: { type: string, enum: [ok, unavailable] }
+        version: { type: string, description: "The git commit SHA the image was built from (GIT_SHA), or dev" }
+
+    Quarter:
+      type: string
+      pattern: '^\d{4}-Q[1-4]$'
+      example: 2026-Q4
+
+    Metric:
+      type: string
+      description: Which routing count a KPI is measured by
+      enum: [leads_assigned, showings_booked, showings_performed, deals_closed]
+
+    Role:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+
+    Member:
+      type: object
+      required: [id, name, email, active, role_id, role_name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string }
+        active: { type: integer, enum: [0, 1] }
+        role_id: { type: integer }
+        role_name: { type: string }
+
+    Kpi:
+      type: object
+      required: [id, name, metric, description]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        metric: { $ref: "#/components/schemas/Metric" }
+        description: { type: string, nullable: true }
+
+    Target:
+      type: object
+      required: [kpi_id, kpi_name, year, quarter, target_value]
+      properties:
+        kpi_id: { type: integer }
+        kpi_name: { type: string }
+        year: { type: integer }
+        quarter: { type: integer, minimum: 1, maximum: 4 }
+        target_value: { type: integer, minimum: 0 }
+
+    TargetList:
+      type: object
+      required: [targets]
+      properties:
+        targets:
+          type: array
+          items: { $ref: "#/components/schemas/Target" }
+
+    Progress:
+      type: object
+      required: [kpi_name, metric, target, actual, percent]
+      properties:
+        kpi_name: { type: string }
+        metric: { $ref: "#/components/schemas/Metric" }
+        target: { type: integer }
+        actual:
+          type: integer
+          nullable: true
+          description: null when the routing service was unavailable
+        percent:
+          type: integer
+          nullable: true
+          description: Rounded actual / target * 100; null when routing was unavailable or the target is 0
+
+    Dashboard:
+      type: object
+      required: [quarter, activity_available, notice, rows]
+      properties:
+        quarter: { $ref: "#/components/schemas/Quarter" }
+        activity_available:
+          type: boolean
+          description: false when routing's GET /activity failed or timed out
+        notice:
+          type: string
+          nullable: true
+          example: "Routing service unavailable: targets are shown without actuals."
+        rows:
+          type: array
+          items:
+            type: object
+            required: [member, progress]
+            properties:
+              member: { $ref: "#/components/schemas/Member" }
+              progress:
+                type: array
+                items: { $ref: "#/components/schemas/Progress" }
