@@ -47,7 +47,7 @@ Consequences: The business rules are protected, so the service code can be restr
 
 ## 5. Build two domains in depth and leave out contracts, tasks, login and CRM sync
 Date: 2026-10-03
-Status: Decided
+Status: Superseded by 10
 Context: A real brokerage would also want contracts, task management, login with permissions, and CRM integration, but I had five days. The brief rewards depth in two domains over breadth, and the deployment contract forbids depending on private external services, which rules out CRM sync in particular. Contracts and task management could have been built inside the app, so for those the limit was time alone.
 Decision: Build only the two domains, team KPIs and lead routing, and not build contracts, task management, login and permissions, CRM sync, or automatic scoring of leads. The inputs are entered by hand: members, targets, leads, each lead's 0-100 score, and outcomes. What the app works out itself is the lead's band, which broker gets it, each broker's score, and the KPI actuals. There are no user accounts and no route checks who is calling, so the app assumes it is only reachable on an internal network.
 Alternatives considered:
@@ -97,3 +97,23 @@ Recovery plan for a bad migration (forward-only, no down-migrations):
 1. A migration that fails is rolled back by its transaction and is not recorded. The service does not start and its container keeps restarting, while the other service keeps working (ADR-6). The fix is a new commit through CI and CD. Because the failed file never ran anywhere, it may be corrected in place if it also never succeeded in CI or locally; otherwise the fix is a new numbered file.
 2. A migration that succeeds but damages data is never edited. The correction is a new numbered migration. If rows were lost, Azure SQL's automatic backups allow a point-in-time restore of the database to a new database from before the deploy, and the lost rows are copied back from it.
 3. Before a migration that changes existing data, I take the data-before evidence and keep the restore point in mind. later/002_add_contact_name.sql is held back until Azure already holds data, for exactly this reason.
+
+## 10. Still no login: the public deployment runs without authentication
+Date: 2026-11-19
+Status: Draft
+Context: ADR-5 left login out of Assignment 1 and said it "must be added before the public Azure deployment in Assignment 2". That deployment now exists: http://jelaawar-ieu2023.westeurope.cloudapp.azure.com is reachable from anywhere on port 80 (ADR-8). Every route of both services is open, so anyone who finds the URL can read the team, its targets and every lead, add members and leads, change targets, deactivate members and record outcomes. Nothing can be deleted, because members are only deactivated and leads have no delete endpoint. Migration 002 adds the name of the person behind each lead, which makes the leads table personal data once real names go in. The brief requires no new features, and the deadline is three days away.
+Decision: Do not build authentication in this assignment. Keep the system to demo data only: invented names, @example.com emails, and leads made by the seed or by hand, never real customers. Superseding ADR-5's consequence, the deployment goes public without login, and this entry records the risk and the conditions for building it.
+The main reason is that the site has no HTTPS (ADR-8). Any login added now would send passwords or session cookies in plain text over the internet, which looks secure but is not. The other reasons:
+- A login that is not a toy needs a user table, password hashing, sessions, CSRF protection on every form, a first-user setup, and both services verifying the same identity, for example a signed token checked in KPI and in routing. That is a third feature area, and the brief puts the credit on the split, the pipeline and the deployment.
+- The professor and the graders need to open the app, so the login would also need a way to give them access without publishing a password in the repository.
+Alternatives considered:
+- HTTP Basic auth in the nginx proxy, one shared user in an htpasswd file: it guards the UI and both APIs in one place with no code change. But over plain HTTP the password crosses the network base64-encoded, which is readable, and a shared password has to be handed out somewhere. It hides the app rather than securing it.
+- Sign-in with Microsoft Entra ID through oauth2-proxy in front of nginx: proper single sign-on with IE accounts and no passwords stored by me. But it needs an app registration in the tenant, which the class service principal cannot create, plus HTTPS for the redirect, plus one more container to explain.
+- Login inside each service, with tokens: the most control, and the most code. It would also change every endpoint in both OpenAPI documents.
+- Restricting port 80 in the NSG to a list of IPs: cheap, but the graders' addresses are unknown, and the brief requires the live URL to stay reachable.
+Consequences: Anyone can change the data in the demo before or during grading. Recovery is easy but manual: a member can be reactivated only through SQL, wrong targets can be overwritten, and junk leads stay. Bots that find the URL get the static UI from nginx, which costs nothing, but any that call /api/... wake the serverless databases and add compute cost (ADR-8). No real or personal data may be entered while this holds.
+I would build authentication as soon as any one of these is true:
+1. real customer or staff data goes in, at the latest with the contact names from migration 002;
+2. the app is used by anyone outside this assignment, or stays online after grading;
+3. different people need different rights, for example managers set targets while brokers only record outcomes.
+The order would be HTTPS first (a Let's Encrypt certificate for the cloudapp name and port 443 on the load balancer and NSG), then Entra ID sign-in through oauth2-proxy at the proxy, so the two services stay unchanged and only accept traffic from the proxy's network. A roles table in KPI would follow if the rights in 3 are needed.
