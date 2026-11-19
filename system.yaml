@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=./system.schema.json
+# TODO(jad): copy the provided system.schema.json to the repository root. Until it is there,
+# CI only checks that this file is valid YAML (see .github/workflows/ci.yml, job "specs").
+#
+# Machine-readable description of the deployed system (assignment §8a). The Azure section
+# follows the professor's extra requirements (one VM behind a load balancer, a DNS zone and
+# the SQL databases, all created by Terraform in infra/terraform/) instead of Container Apps
+# and Static Web Apps: see ADR-8. If the schema has no fields for these, the fields below
+# may need renaming to match it.
+student: jelaawar.ieu2023
+prefix: jelaawar-ieu2023
+public_url: http://jelaawar-ieu2023.westeurope.cloudapp.azure.com
+
+ui:
+  path: ui
+  # served as static files by a stock nginx container on the VM, behind the proxy at "/"
+  served_by: nginx proxy on the VM (deploy/docker-compose.prod.yml, service ui)
+  config: ui/config.js
+  calls: [kpi, routing]
+
+azure:
+  resource_group: rg-sdd-3a # TODO(jad): rg-sdd-3a or rg-sdd-3b, whichever is your class
+  location: westeurope
+  infrastructure_as_code: infra/terraform
+  virtual_machine: jelaawar-ieu2023-vm
+  load_balancer: jelaawar-ieu2023-lb
+  public_ip: jelaawar-ieu2023-lb-ip
+  dns_zone: jelaawar-ieu2023.devops.ie
+  dns_record: app.jelaawar-ieu2023.devops.ie
+  sql_server: jelaawar-ieu2023-sql
+  registry: ghcr.io/jadelaawar42027
+  terraform_state: storage account in the resource group, see infra/bootstrap.md
+
+proxy:
+  config: deploy/nginx.conf
+  routes:
+    /: ui
+    /api/kpi/: kpi
+    /api/routing/: routing
+    /health: 200 only when both services report healthy
+    /lb-probe: 200 while nginx runs; used by the load balancer probe, touches no database
+
+services:
+  kpi:
+    description: Team members, roles, KPI definitions, quarterly targets and the KPI dashboard.
+    path: services/kpi
+    openapi: services/kpi/openapi.yaml
+    image: ghcr.io/jadelaawar42027/kpi
+    port_default: 8000
+    health: /health
+    migrations: services/kpi/migrations
+    database:
+      tables: [roles, members, kpi_definitions, kpi_targets, schema_migrations]
+      login: kpi_svc
+    env:
+      PORT: { default: 8000, description: Port gunicorn listens on }
+      DATABASE_URL: { secret: true, description: "Connection string of the kpi database, mssql://kpi_svc:<password>@<server>:1433/<database>" }
+      ROUTING_URL: { default: "http://routing:8000", description: Base URL of the routing service }
+      ROUTING_TIMEOUT_S: { default: 2, description: Timeout in seconds for calls to routing }
+      SEED_DEMO: { default: "", description: "1 loads demo data on start, only while the members table is empty" }
+      CORS_ORIGINS: { default: "", description: Comma-separated origins allowed to call the API directly; empty behind the proxy }
+      GIT_SHA: { default: dev, description: Version reported by /health; the pipeline sets the commit SHA }
+      DB_CONNECT_RETRIES: { default: 8, description: Connection attempts with backoff, so a paused database can resume }
+    calls:
+      - service: routing
+        url_env: ROUTING_URL
+        endpoints: ["GET /activity"]
+        timeout_s: 2
+        on_failure: The dashboard shows every target without actuals (actual and percent null), with a "Routing service unavailable" notice.
+    azure:
+      sql_database: jelaawar-ieu2023-kpi-db
+      runs_on: jelaawar-ieu2023-vm
+
+  routing:
+    description: Leads, outcomes, broker scoring, automatic assignment, the leaderboard and the activity counts used as KPI actuals.
+    path: services/routing
+    openapi: services/routing/openapi.yaml
+    image: ghcr.io/jadelaawar42027/routing
+    port_default: 8000
+    health: /health
+    migrations: services/routing/migrations
+    database:
+      tables: [leads, lead_outcomes, schema_migrations]
+      login: routing_svc
+    env:
+      PORT: { default: 8000, description: Port gunicorn listens on }
+      DATABASE_URL: { secret: true, description: "Connection string of the routing database, mssql://routing_svc:<password>@<server>:1433/<database>" }
+      KPI_URL: { default: "http://kpi:8000", description: Base URL of the KPI service }
+      KPI_TIMEOUT_S: { default: 2, description: Timeout in seconds for calls to KPI }
+      SEED_DEMO: { default: "", description: "1 loads demo leads on start, only while the leads table is empty (needs KPI's brokers)" }
+      CORS_ORIGINS: { default: "", description: Comma-separated origins allowed to call the API directly; empty behind the proxy }
+      GIT_SHA: { default: dev, description: Version reported by /health; the pipeline sets the commit SHA }
+      DB_CONNECT_RETRIES: { default: 8, description: Connection attempts with backoff, so a paused database can resume }
+    calls:
+      - service: kpi
+        url_env: KPI_URL
+        endpoints: ["GET /brokers/active"]
+        timeout_s: 2
+        on_failure: A new lead is saved without a broker (assignment "skipped") with a notice; the leaderboard ranks every member who has leads, with a notice.
+    azure:
+      sql_database: jelaawar-ieu2023-routing-db
+      runs_on: jelaawar-ieu2023-vm

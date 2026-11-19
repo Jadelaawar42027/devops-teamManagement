@@ -1,0 +1,321 @@
+# CD: deploys to Azure after CI passed on a push to main, and only then.
+#   images        build both service images and push them to GHCR, tagged with the commit SHA
+#   infra         terraform plan + apply (VM, load balancer, DNS, SQL), remote state in Azure
+#   db-users      create/update each service's contained database user (idempotent)
+#   deploy        ship the compose file, nginx.conf, ui/ and a .env built from secrets to the
+#                 VM and run docker compose pull + up -d there (az vm run-command)
+#   verify        poll http://<fqdn>/health for up to 3 minutes; fail unless 200 with this SHA
+#
+# Secrets and variables it needs are listed in README.md ("Deployment").
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write # push images to GHCR; the VM pulls them with this run's token
+
+# never two deploys at once, and never cancel one halfway through a terraform apply
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+env:
+  # the exact commit CI tested, not whatever main points at by now
+  SHA: ${{ github.event.workflow_run.head_sha }}
+  TF_DIR: infra/terraform
+  TF_VERSION: 1.17.2
+
+jobs:
+  images:
+    name: push ${{ matrix.service }} image
+    # CI passed, and it ran for a push (a merged PR), not for a pull request
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        service: [kpi, routing]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image name (GHCR needs a lowercase owner)
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          # the SHA tag is what gets deployed; latest is only a convenience for humans
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ env.SHA }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SHA }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  infra:
+    name: terraform apply
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    env:
+      # the class service principal, read by the azurerm provider and backend
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Terraform input variables (TF_VAR_<name>)
+      TF_VAR_resource_group_name: ${{ vars.AZURE_RESOURCE_GROUP }}
+      TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+      TF_VAR_ssh_public_key: ${{ vars.VM_SSH_PUBLIC_KEY }}
+      TF_VAR_sql_admin_password: ${{ secrets.SQL_ADMIN_PASSWORD }}
+      TF_IN_AUTOMATION: "true"
+    outputs:
+      resource_group: ${{ steps.out.outputs.resource_group }}
+      vm_name: ${{ steps.out.outputs.vm_name }}
+      fqdn: ${{ steps.out.outputs.fqdn }}
+      public_ip: ${{ steps.out.outputs.public_ip }}
+      sql_server_name: ${{ steps.out.outputs.sql_server_name }}
+      sql_server_fqdn: ${{ steps.out.outputs.sql_server_fqdn }}
+      sql_admin_login: ${{ steps.out.outputs.sql_admin_login }}
+      kpi_database: ${{ steps.out.outputs.kpi_database }}
+      routing_database: ${{ steps.out.outputs.routing_database }}
+      dns_zone: ${{ steps.out.outputs.dns_zone }}
+      dns_name_server: ${{ steps.out.outputs.dns_name_server }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # the backend block in providers.tf is empty; where the state lives comes from secrets
+      - name: terraform init (remote state)
+        run: >-
+          terraform init -input=false
+          -backend-config="resource_group_name=${{ secrets.TF_STATE_RESOURCE_GROUP }}"
+          -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}"
+          -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}"
+          -backend-config="key=jelaawar-ieu2023.tfstate"
+
+      - name: terraform plan
+        run: terraform plan -input=false -lock-timeout=5m -out=tfplan
+
+      # applies exactly the plan above, nothing that changed in between
+      - name: terraform apply
+        run: terraform apply -input=false -lock-timeout=5m tfplan
+
+      - name: Read outputs
+        id: out
+        run: |
+          terraform output -json > outputs.json
+          {
+            echo "resource_group=$(jq -r .resource_group_name.value outputs.json)"
+            echo "vm_name=$(jq -r .vm_name.value outputs.json)"
+            echo "fqdn=$(jq -r .fqdn.value outputs.json)"
+            echo "public_ip=$(jq -r .public_ip.value outputs.json)"
+            echo "sql_server_name=$(jq -r .sql_server_name.value outputs.json)"
+            echo "sql_server_fqdn=$(jq -r .sql_server_fqdn.value outputs.json)"
+            echo "sql_admin_login=$(jq -r .sql_admin_login.value outputs.json)"
+            echo "kpi_database=$(jq -r .kpi_database_name.value outputs.json)"
+            echo "routing_database=$(jq -r .routing_database_name.value outputs.json)"
+            echo "dns_zone=$(jq -r .dns_zone_name.value outputs.json)"
+            echo "dns_name_server=$(jq -r '.dns_name_servers.value[0]' outputs.json)"
+          } >> "$GITHUB_OUTPUT"
+
+  db-users:
+    name: database users
+    needs: infra
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RESOURCE_GROUP: ${{ needs.infra.outputs.resource_group }}
+      SQL_SERVER: ${{ needs.infra.outputs.sql_server_name }}
+      RULE: gha-cd-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: azure/login@v3
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pip install pymssql==2.4.6
+
+      # The SQL firewall only lets in Azure services and the VM. Open it for this runner's IP
+      # while the users are created, and always close it again afterwards.
+      - name: Open the SQL firewall for this runner
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          az sql server firewall-rule create --resource-group "$RESOURCE_GROUP" --server "$SQL_SERVER" \
+            --name "$RULE" --start-ip-address "$ip" --end-ip-address "$ip" --output none
+
+      - name: Create or update the contained users
+        env:
+          SQL_SERVER_FQDN: ${{ needs.infra.outputs.sql_server_fqdn }}
+          SQL_ADMIN_LOGIN: ${{ needs.infra.outputs.sql_admin_login }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+          KPI_DATABASE: ${{ needs.infra.outputs.kpi_database }}
+          KPI_DB_PASSWORD: ${{ secrets.KPI_DB_PASSWORD }}
+          ROUTING_DATABASE: ${{ needs.infra.outputs.routing_database }}
+          ROUTING_DB_PASSWORD: ${{ secrets.ROUTING_DB_PASSWORD }}
+        run: python deploy/create_db_users.py
+
+      - name: Close the SQL firewall again
+        if: always()
+        run: |
+          az sql server firewall-rule delete --resource-group "$RESOURCE_GROUP" --server "$SQL_SERVER" \
+            --name "$RULE" --output none || true
+
+  deploy:
+    name: deploy to the VM
+    needs: [images, infra, db-users]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RESOURCE_GROUP: ${{ needs.infra.outputs.resource_group }}
+      VM_NAME: ${{ needs.infra.outputs.vm_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: azure/login@v3
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+      # Same layout as the repository, so the relative paths in the compose file work:
+      # bundle/deploy/{docker-compose.prod.yml,nginx.conf,.env} and bundle/ui/
+      - name: Bundle the files for the VM
+        env:
+          SQL_SERVER_FQDN: ${{ needs.infra.outputs.sql_server_fqdn }}
+          KPI_DATABASE: ${{ needs.infra.outputs.kpi_database }}
+          ROUTING_DATABASE: ${{ needs.infra.outputs.routing_database }}
+          KPI_DB_PASSWORD: ${{ secrets.KPI_DB_PASSWORD }}
+          ROUTING_DB_PASSWORD: ${{ secrets.ROUTING_DB_PASSWORD }}
+          SEED_DEMO: ${{ vars.SEED_DEMO || '1' }}
+        run: |
+          mkdir -p bundle/deploy
+          cp deploy/docker-compose.prod.yml deploy/nginx.conf bundle/deploy/
+          cp -R ui bundle/ui
+          # passwords are URL-encoded so characters like @ : / $ cannot break the URL or
+          # be read by compose as variables; the result is never printed
+          python3 - > bundle/deploy/.env <<'EOF'
+          import os
+          from urllib.parse import quote
+
+          def url(user, password_var, database_var):
+              password = quote(os.environ[password_var], safe="")
+              return f"mssql://{user}:{password}@{os.environ['SQL_SERVER_FQDN']}:1433/{os.environ[database_var]}"
+
+          print(f"GHCR_OWNER={os.environ['GITHUB_REPOSITORY_OWNER'].lower()}")
+          print(f"IMAGE_TAG={os.environ['SHA']}")
+          print(f"SEED_DEMO={os.environ['SEED_DEMO']}")
+          print(f"KPI_DATABASE_URL={url('kpi_svc', 'KPI_DB_PASSWORD', 'KPI_DATABASE')}")
+          print(f"ROUTING_DATABASE_URL={url('routing_svc', 'ROUTING_DB_PASSWORD', 'ROUTING_DATABASE')}")
+          EOF
+          tar -czf bundle.tgz -C bundle .
+          echo "bundle: $(wc -c < bundle.tgz) bytes"
+
+      # The script runs as root on the VM through the Azure agent (no SSH needed). The bundle
+      # and a GHCR token that expires when this job ends are embedded in it.
+      - name: Write the deploy script
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bundle=$(base64 -w0 bundle.tgz)
+          cat > deploy.sh <<EOF
+          set -euo pipefail
+          # first deploy on a new VM: wait until cloud-init has installed Docker
+          cloud-init status --wait > /dev/null || true
+          command -v docker > /dev/null || { echo "docker is not installed"; exit 1; }
+          install -m 0750 -d /opt/app
+          cd /opt/app
+          rm -rf ui
+          echo '${bundle}' | base64 -d | tar -xz -C /opt/app
+          chmod 600 deploy/.env
+          cd deploy
+          echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin > /dev/null
+          docker compose -f docker-compose.prod.yml pull --quiet
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker logout ghcr.io > /dev/null
+          docker image prune -f > /dev/null
+          docker compose -f docker-compose.prod.yml ps
+          echo DEPLOY_OK
+          EOF
+
+      # run-command reports success even when the script fails, so the script's own
+      # DEPLOY_OK marker decides
+      - name: Run it on the VM
+        run: |
+          az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
+            --command-id RunShellScript --scripts @deploy.sh \
+            --query 'value[0].message' --output tsv > result.txt
+          cat result.txt
+          grep -q DEPLOY_OK result.txt
+
+  verify:
+    name: health check
+    needs: [infra, deploy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      FQDN: ${{ needs.infra.outputs.fqdn }}
+    steps:
+      # 3 minutes: a paused database takes up to about a minute to resume, then each
+      # service runs its pending migrations before it answers
+      - name: Poll /health until 200 with this commit's version
+        run: |
+          deadline=$((SECONDS + 180))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            rm -f health.json
+            code=$(curl -s -o health.json -w '%{http_code}' --max-time 10 "http://$FQDN/health" || true)
+            kpi=$(curl -s --max-time 10 "http://$FQDN/api/kpi/health" | jq -r .version 2>/dev/null || true)
+            echo "$(date -u +%T) /health=$code $(cat health.json 2>/dev/null) kpi=$kpi"
+            if [ "$code" = 200 ] && [ "$(jq -r .version health.json)" = "$SHA" ] && [ "$kpi" = "$SHA" ]; then
+              echo "deployed $SHA is healthy at http://$FQDN"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::http://$FQDN/health did not return 200 for $SHA within 3 minutes"
+          exit 1
+
+      # the zone is not delegated, so ask its own Azure name server directly
+      - name: DNS record answers from the zone's name server
+        env:
+          ZONE: ${{ needs.infra.outputs.dns_zone }}
+          NAME_SERVER: ${{ needs.infra.outputs.dns_name_server }}
+          PUBLIC_IP: ${{ needs.infra.outputs.public_ip }}
+        run: |
+          nslookup "app.$ZONE" "$NAME_SERVER" | tee dns.txt
+          grep -q "$PUBLIC_IP" dns.txt

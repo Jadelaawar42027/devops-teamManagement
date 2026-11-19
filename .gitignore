@@ -6,3 +6,13 @@ CLAUDE.md
 .env
 .pytest_cache/
 .ruff_cache/
+# Terraform: provider cache, state (holds the SQL admin password), plans and real var files.
+# .terraform.lock.hcl IS committed: it pins the provider versions and checksums.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.tfvars
+!*.tfvars.example

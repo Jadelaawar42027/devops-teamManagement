@@ -10,6 +10,8 @@ known-first-party = ["app", "db", "migrate", "routing_client", "seed", "service"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the service modules (app, db, service...) sit next to tests/, not in a package
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["service", "migrate"]
