@@ -1,0 +1,22 @@
+#cloud-config
+# Runs once, on the VM's first boot. Installs Docker Engine and the compose plugin from
+# Docker's own apt repository (Ubuntu's docker.io package has no compose v2 plugin), and
+# creates /opt/app, where the pipeline puts docker-compose.yml, nginx.conf, ui/ and .env.
+# The pipeline waits for this to finish (cloud-init status --wait) before its first deploy.
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+
+runcmd:
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+  # lets the admin run docker without sudo when debugging over SSH
+  - usermod -aG docker ${admin_username}
+  # root-only: .env in here holds the database passwords
+  - install -m 0750 -d /opt/app
