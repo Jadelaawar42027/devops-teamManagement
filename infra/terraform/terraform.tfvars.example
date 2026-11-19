@@ -1,14 +1,11 @@
 # Copy to terraform.tfvars (git-ignored) only to run Terraform from your own machine.
 # The pipeline does not use this file: it sets the same values as TF_VAR_* environment
-# variables from GitHub variables and secrets (see README, "Deployment").
+# variables from GitHub secrets (see README, "Deployment").
 
-resource_group_name   = "rg-sdd-3a" # TODO: your class's resource group (rg-sdd-3a or rg-sdd-3b)
-create_resource_group = false
-location              = "westeurope"
+resource_group_name = "rg-sdd-3a" # TODO: rg-sdd-3a or rg-sdd-3b, your class
+image_tag           = "<commit sha of images already in GHCR>"
 
-admin_cidr     = "203.0.113.7/32" # your public IP: curl -s https://api.ipify.org
-ssh_public_key = "ssh-ed25519 AAAA... you@laptop"
-
-# Never put the real password in a file. Set it in your shell instead:
+# Never put real passwords in a file. Set them in your shell instead:
 #   export TF_VAR_sql_admin_password='...'
-# sql_admin_password = ""
+#   export TF_VAR_kpi_db_password='...'
+#   export TF_VAR_routing_db_password='...'

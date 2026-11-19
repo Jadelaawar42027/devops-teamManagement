@@ -3,12 +3,13 @@
 const config = window.APP_CONFIG || {};
 
 export const SERVICES = {
-  kpi: { name: "KPI service", base: (config.KPI_URL || "/api/kpi").replace(/\/$/, "") },
-  routing: { name: "routing service", base: (config.ROUTING_URL || "/api/routing").replace(/\/$/, "") },
+  kpi: { name: "KPI service", base: (config.KPI_URL || "http://localhost:8001").replace(/\/$/, "") },
+  routing: { name: "routing service", base: (config.ROUTING_URL || "http://localhost:8002").replace(/\/$/, "") },
 };
 
-// Long enough for an Azure SQL serverless database to resume from auto-pause.
-const TIMEOUT_MS = 30000;
+// On Azure the first request after idle starts a container (scaled to zero) and may find
+// its database paused, which takes up to about a minute to resume: wait 90 seconds.
+const TIMEOUT_MS = 90000;
 
 export class ApiError extends Error {
   // kind: "unavailable" (down, unreachable, timed out), "not_found", "rejected" (4xx), "server" (5xx)
@@ -36,7 +37,7 @@ async function request(service, path, { method = "GET", body } = {}) {
   } catch (err) {
     const message = err.name === "AbortError"
       ? `The ${svc.name} did not answer within ${TIMEOUT_MS / 1000} seconds.`
-      : `Could not reach the ${svc.name}. Check your network connection.`;
+      : `Could not reach the ${svc.name}: it is down, or your connection is.`;
     announce(service, false);
     throw new ApiError(service, 0, "unavailable", message);
   } finally {
@@ -124,7 +125,9 @@ export const api = {
 export async function health(service) {
   const svc = SERVICES[service];
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  // long enough for a cold start (see TIMEOUT_MS), so a service that is only waking up is
+  // not reported as unreachable
+  const timer = setTimeout(() => controller.abort(), 60000);
   try {
     const response = await fetch(svc.base + "/health", { cache: "no-store", signal: controller.signal });
     const data = await response.json().catch(() => ({}));

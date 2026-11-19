@@ -80,7 +80,7 @@ Consequences: ADR-2 held. The two functions it named became the only two endpoin
 Date: 2026-11-19
 Status: Draft
 Context: Assignment 1 had one SQLite file created from schema.sql on first boot. Now each service needs its own SQL Server database that only it can open, and the schema has to change in place once a database holds data. A migration runs on startup against the live database, so a bad one would hit real rows.
-Decision: Each service has its own database and its own user. Locally that is db/init.sql, which is idempotent and creates the kpi and routing databases with a kpi_svc and a routing_svc login, each a user in its own database only. On Azure, the pipeline creates contained users with deploy/create_db_users.py. These are users that exist only inside their database, with no server login, created through the server admin, which the apps never use. Each user is db_owner of its own database, because each service runs its own migrations.
+Decision: Each service has its own database and its own user. Locally that is db/init.sql, which is idempotent and creates the kpi and routing databases with a kpi_svc and a routing_svc login, each a user in its own database only. On Azure, the pipeline creates contained users with infra/scripts/create_db_users.py. These are users that exist only inside their database, with no server login, created through the server admin, which the apps never use. Each user is db_owner of its own database, because each service runs its own migrations.
 The SQLite schema was ported by hand: INTEGER PRIMARY KEY AUTOINCREMENT became INT IDENTITY, TEXT became NVARCHAR, text dates became DATETIME2 with SYSUTCDATETIME() defaults, lastrowid became OUTPUT INSERTED.id, and the upsert became an UPDATE followed by an INSERT when no row was updated.
 Migrations are numbered SQL files in each service's migrations/ folder, run by a small runner of my own (migrate.py) when the service starts:
 - every applied file is recorded in schema_migrations, so a second start applies nothing;
@@ -98,22 +98,66 @@ Recovery plan for a bad migration (forward-only, no down-migrations):
 2. A migration that succeeds but damages data is never edited. The correction is a new numbered migration. If rows were lost, Azure SQL's automatic backups allow a point-in-time restore of the database to a new database from before the deploy, and the lost rows are copied back from it.
 3. Before a migration that changes existing data, I take the data-before evidence and keep the restore point in mind. later/002_add_contact_name.sql is held back until Azure already holds data, for exactly this reason.
 
+## 8. Serverless on Azure: Container Apps, Azure SQL serverless and a Static Web App, created by Terraform
+Date: 2026-11-20
+Status: Draft
+Context: The brief (§1a, §7) fixes the hosting: both services on Azure Container Apps (Consumption plan, scaling to zero), one serverless Azure SQL database per service on one logical server, and the UI on one Azure Static Web App. Only pay-per-use resources are allowed; anything with a fixed monthly cost needs a justification here. Each student may create at most 2 Container Apps, 2 serverless databases and 1 Static Web App in the shared class resource group, "not even temporarily". The free choice is how the infrastructure is defined: Azure CLI commands in the workflow, or IaC.
+Decision: Terraform in infra/terraform creates, in the class resource group, read through a data source and never created:
+- the logical server jelaawar-ieu2023-sql and two serverless databases, jelaawar-ieu2023-kpi-db and jelaawar-ieu2023-routing-db: GP_S_Gen5_1 (0.5 to 1 vCore), auto-pause after 15 minutes (the shortest Azure allows; the provider rejects 14), 2 GB, locally redundant backups. The firewall allows Azure services only;
+- the Container Apps environment jelaawar-ieu2023-env on the Consumption plan, and the two apps jelaawar-ieu2023-kpi and jelaawar-ieu2023-routing. Each has public HTTPS ingress, min 0 and max 1 replicas, the image tagged with the commit SHA from GHCR, its DATABASE_URL as a Container App secret, and CORS_ORIGINS set to the Static Web App's origin;
+- the Static Web App jelaawar-ieu2023-ui on the Free tier, whose URL is the public URL of the system.
+The environment is the one resource the brief does not list among the allowance. Container Apps cannot exist without one, the brief's own system.yaml names it (<prefix>-env), and on the Consumption plan it costs nothing by itself. Nothing else is created:
+- no Log Analytics workspace, which bills per GB; logs are streamed live with az containerapp logs show;
+- no Azure Container Registry, because GHCR is free;
+- no storage of my own: the Terraform state lives where the professor provides it.
+Alternatives considered:
+- Azure CLI commands in the workflow: imperative, so a second run fails or duplicates resources unless every command checks first, and there is no plan to read before a change is applied. Terraform compares the code with the state and changes only the difference, and the same files document the infrastructure.
+- Bicep: also declarative and Azure-native, with no state file to host. But Terraform's plan output and state make each change explicit, and the same tool works beyond Azure.
+- A VM behind a load balancer with a DNS zone: an earlier draft of mine built this, and I removed it. The brief puts virtual machines out of scope as always-on compute, and the load balancer and VM cost money every hour.
+Consequences: Cost model: everything bills only while used.
+- Container Apps bill per second of vCPU and memory while a replica runs, inside a monthly free grant, and nothing at zero replicas.
+- The databases bill compute per second while running (0.5 vCore minimum) and only storage while paused.
+- The Static Web App is free.
+An idle system costs only the databases' storage (TODO: check with the Azure pricing calculator).
+Scale to zero for the containers: the first request after a quiet period waits for a container to start. Scale to zero for the database: the database may be paused, and resuming takes up to about a minute, with connections refused meanwhile (error 40613).
+- db.py retries with exponential backoff (DB_CONNECT_RETRIES=10, about 90 seconds).
+- Migrations run at startup, before gunicorn answers. With max_replicas 1 they can never run twice at once.
+- The UI waits up to 90 seconds before showing an error, and the pipeline's health check allows 3 minutes.
+- Calls between the services keep their 2-second timeout. So when the other app is still at zero replicas, the first dashboard or new lead degrades as if it were down (ADR-6), and that call wakes it for the next request.
+- No health probe calls /health, because it writes to the database and would keep it from ever pausing.
+At 100x traffic:
+- min_replicas 1 or more, so there are no cold starts, and max_replicas above 1;
+- migrations moved from startup into one pipeline step, because replicas would race;
+- auto-pause turned off, with more vCores;
+- a cache for the dashboard's activity counts;
+- the calls between the services moved to internal ingress, instead of going out and back in through the public one.
+
 ## 10. Still no login: the public deployment runs without authentication
 Date: 2026-11-19
 Status: Draft
-Context: ADR-5 left login out of Assignment 1 and said it "must be added before the public Azure deployment in Assignment 2". That deployment now exists: http://jelaawar-ieu2023.westeurope.cloudapp.azure.com is reachable from anywhere on port 80 (ADR-8). Every route of both services is open, so anyone who finds the URL can read the team, its targets and every lead, add members and leads, change targets, deactivate members and record outcomes. Nothing can be deleted, because members are only deactivated and leads have no delete endpoint. Migration 002 adds the name of the person behind each lead, which makes the leads table personal data once real names go in. The brief requires no new features, and the deadline is three days away.
+Context: ADR-5 left login out of Assignment 1 and said it "must be added before the public Azure deployment in Assignment 2". That deployment now exists. The UI is a public Static Web App, and both services have public HTTPS URLs, because the browser calls them directly (ADR-8). Every route is open, so anyone who finds a URL can:
+- read the team, its targets and every lead;
+- add members and leads, change targets, deactivate members and record outcomes.
+Nothing can be deleted: members are only deactivated, and leads have no delete endpoint. Migration 002 adds the name of the person behind each lead, which makes the leads table personal data once real names go in. The brief requires no new features, and the deadline is three days away.
 Decision: Do not build authentication in this assignment. Keep the system to demo data only: invented names, @example.com emails, and leads made by the seed or by hand, never real customers. Superseding ADR-5's consequence, the deployment goes public without login, and this entry records the risk and the conditions for building it.
-The main reason is that the site has no HTTPS (ADR-8). Any login added now would send passwords or session cookies in plain text over the internet, which looks secure but is not. The other reasons:
-- A login that is not a toy needs a user table, password hashing, sessions, CSRF protection on every form, a first-user setup, and both services verifying the same identity, for example a signed token checked in KPI and in routing. That is a third feature area, and the brief puts the credit on the split, the pipeline and the deployment.
-- The professor and the graders need to open the app, so the login would also need a way to give them access without publishing a password in the repository.
+The reason is that a login that is not a toy is a third feature area, larger than either domain:
+- The UI is static and lives on a different origin from the two services. A cookie session set by one service would not reach the other, so it needs tokens: the UI signs the user in, and sends a token that both services verify on every request.
+- It also needs CORS with credentials, a way to give the professor and graders access, and roles if managers and brokers should see different things.
+- Doing it properly means a central identity provider, Microsoft Entra ID, which needs an app registration in the IE tenant. Neither the class service principal nor a student account can create one.
+- The brief puts the credit on the split, the pipeline and the deployment.
 Alternatives considered:
-- HTTP Basic auth in the nginx proxy, one shared user in an htpasswd file: it guards the UI and both APIs in one place with no code change. But over plain HTTP the password crosses the network base64-encoded, which is readable, and a shared password has to be handed out somewhere. It hides the app rather than securing it.
-- Sign-in with Microsoft Entra ID through oauth2-proxy in front of nginx: proper single sign-on with IE accounts and no passwords stored by me. But it needs an app registration in the tenant, which the class service principal cannot create, plus HTTPS for the redirect, plus one more container to explain.
-- Login inside each service, with tokens: the most control, and the most code. It would also change every endpoint in both OpenAPI documents.
-- Restricting port 80 in the NSG to a list of IPs: cheap, but the graders' addresses are unknown, and the brief requires the live URL to stay reachable.
-Consequences: Anyone can change the data in the demo before or during grading. Recovery is easy but manual: a member can be reactivated only through SQL, wrong targets can be overwritten, and junk leads stay. Bots that find the URL get the static UI from nginx, which costs nothing, but any that call /api/... wake the serverless databases and add compute cost (ADR-8). No real or personal data may be entered while this holds.
+- Container Apps' built-in authentication ("Easy Auth") with Entra ID: no code in the services, but it still needs the app registration. It is also built for pages served by the app itself, so a static UI on another origin would still need tokens.
+- The Static Web App's built-in login (GitHub or Microsoft accounts, available on the Free tier): it protects the UI's files, but not the two Container Apps, which the browser calls directly on other origins. Putting the services behind the Static Web App as "linked backends" needs the Standard tier, a fixed monthly cost.
+- One shared password checked by both services (an API key in a header): simple, but the key would have to live in the static UI's JavaScript, where anyone can read it. It hides the app rather than securing it.
+- Username and password login inside each service, with signed tokens: the most control, and the most code: a users table, password hashing, token signing and checking in both services, and changes to every endpoint in both OpenAPI documents.
+- IP restrictions on the Container Apps' ingress: cheap, but the graders' addresses are unknown, and the brief requires the live URL to stay reachable.
+Consequences: Anyone can change the demo data before or during grading. Recovery is easy but manual: a member can be reactivated only through SQL, wrong targets can be overwritten, and junk leads stay. Bots that find the Static Web App cost nothing, but any that call a service start a Container App and wake its database, which bills while it runs (ADR-8). No real or personal data may be entered while this holds.
 I would build authentication as soon as any one of these is true:
 1. real customer or staff data goes in, at the latest with the contact names from migration 002;
 2. the app is used by anyone outside this assignment, or stays online after grading;
 3. different people need different rights, for example managers set targets while brokers only record outcomes.
-The order would be HTTPS first (a Let's Encrypt certificate for the cloudapp name and port 443 on the load balancer and NSG), then Entra ID sign-in through oauth2-proxy at the proxy, so the two services stay unchanged and only accept traffic from the proxy's network. A roles table in KPI would follow if the rights in 3 are needed.
+The order would be:
+1. an Entra ID app registration, requested from IT, with sign-in in the UI (Microsoft's MSAL library);
+2. both services checking the Entra ID token on every request except /health, through a small shared check in web.py;
+3. a roles claim or a roles table in KPI, if the rights in condition 3 are needed.
+HTTPS is already in place on every part of the system.

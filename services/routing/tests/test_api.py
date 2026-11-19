@@ -62,6 +62,20 @@ def test_every_request_is_logged_with_method_path_status_and_duration(client, ca
     assert any(r.getMessage().startswith(f"GET /leads/{MISSING_ID} 404 ") for r in caplog.records)
 
 
+def test_cors_only_for_the_configured_origin(conn, monkeypatch):
+    # on Azure the UI (Static Web App) calls routing from another origin
+    monkeypatch.setenv("CORS_ORIGINS", "https://ui.example")
+    client = app_module.create_app(migrate=False).test_client()
+    allowed = client.get("/leads", headers={"Origin": "https://ui.example"})
+    other = client.get("/leads", headers={"Origin": "https://evil.example"})
+    assert allowed.headers["Access-Control-Allow-Origin"] == "https://ui.example"
+    assert "Access-Control-Allow-Origin" not in other.headers
+    preflight_headers = {"Origin": "https://ui.example", "Access-Control-Request-Method": "POST"}
+    preflight = client.options("/leads", headers=preflight_headers)
+    assert preflight.status_code == 204
+    assert "POST" in preflight.headers["Access-Control-Allow-Methods"]
+
+
 def test_unknown_path_is_json_404(client):
     assert client.get("/nope").get_json() == {"error": "not found"}
 

@@ -24,10 +24,10 @@ index b139a96..a0cb255 100644
                  return bad_request(str(exc))
              band = service.band_for_score(score)
 diff --git a/services/routing/openapi.yaml b/services/routing/openapi.yaml
-index 5ecdaa4..8a53f3e 100644
+index 8a60cf8..be4d0d7 100644
 --- a/services/routing/openapi.yaml
 +++ b/services/routing/openapi.yaml
-@@ -80,8 +80,9 @@ paths:
+@@ -85,8 +85,9 @@ paths:
            application/json:
              schema:
                type: object
@@ -38,7 +38,7 @@ index 5ecdaa4..8a53f3e 100644
                  source: { type: string, description: Trimmed; must not be empty }
                  score:
                    description: Whole number from 0 to 100 (a string holding one is accepted)
-@@ -274,9 +275,13 @@ components:
+@@ -279,9 +280,13 @@ components:
  
      Lead:
        type: object
@@ -137,10 +137,10 @@ index 59d8570..abda588 100644
  
  def get_lead(conn, lead_id):
 diff --git a/services/routing/tests/test_api.py b/services/routing/tests/test_api.py
-index 9b485aa..3095a9b 100644
+index ade561c..97250f0 100644
 --- a/services/routing/tests/test_api.py
 +++ b/services/routing/tests/test_api.py
-@@ -72,11 +72,12 @@ def test_unknown_path_is_json_404(client):
+@@ -86,11 +86,12 @@ def test_unknown_path_is_json_404(client):
  @responses.activate
  def test_new_lead_is_assigned_to_an_active_broker(client):
      responses.get(BROKERS_URL, json={"broker_ids": [7]})
@@ -154,7 +154,7 @@ index 9b485aa..3095a9b 100644
      assert body["lead"]["assigned_at"].endswith("Z")
  
  
-@@ -84,7 +85,7 @@ def test_new_lead_is_assigned_to_an_active_broker(client):
+@@ -98,7 +99,7 @@ def test_new_lead_is_assigned_to_an_active_broker(client):
  @pytest.mark.parametrize("failure", KPI_DOWN)
  def test_new_lead_is_saved_unassigned_when_kpi_is_unavailable(client, failure):
      responses.get(BROKERS_URL, **failure)
@@ -163,7 +163,7 @@ index 9b485aa..3095a9b 100644
      assert response.status_code == 201
      body = response.get_json()
      assert body["assignment"] == "skipped"
-@@ -97,28 +98,41 @@ def test_new_lead_is_saved_unassigned_when_kpi_is_unavailable(client, failure):
+@@ -111,28 +112,41 @@ def test_new_lead_is_saved_unassigned_when_kpi_is_unavailable(client, failure):
  @responses.activate
  def test_new_lead_without_active_brokers_is_saved_unassigned(client):
      responses.get(BROKERS_URL, json={"broker_ids": []})
@@ -209,7 +209,7 @@ index 9b485aa..3095a9b 100644
      response = client.post(f"/leads/{lead_id}/outcomes", json={"stage": "showing_booked"})
      assert response.status_code == 201
      assert [o["outcome"] for o in response.get_json()["outcomes"]] == ["showing_booked"]
-@@ -126,11 +140,13 @@ def test_list_and_get_leads_with_outcomes(client):
+@@ -140,11 +154,13 @@ def test_list_and_get_leads_with_outcomes(client):
      assert [(lead["id"], lead["band"], lead["stage"]) for lead in listed] == [(lead_id, "cold", "showing_booked")]
      detail = client.get(f"/leads/{lead_id}").get_json()
      assert detail["band"] == "cold" and detail["source"] == "referral"
@@ -224,7 +224,7 @@ index 9b485aa..3095a9b 100644
      assert client.post(f"/leads/{lead_id}/outcomes", json={"stage": "sold"}).status_code == 400
      assert client.post(f"/leads/{MISSING_ID}/outcomes", json={"stage": "closed"}).status_code == 404
      assert client.get(f"/leads/{MISSING_ID}").status_code == 404
-@@ -150,7 +166,7 @@ def test_leaderboard_ranks_the_active_brokers(client, conn):
+@@ -164,7 +180,7 @@ def test_leaderboard_ranks_the_active_brokers(client, conn):
  @responses.activate
  @pytest.mark.parametrize("failure", KPI_DOWN)
  def test_leaderboard_falls_back_to_members_with_leads_when_kpi_is_unavailable(client, conn, failure):
@@ -233,7 +233,7 @@ index 9b485aa..3095a9b 100644
      service.assign_lead(conn, lead_id, 5)
      responses.get(BROKERS_URL, **failure)
      body = client.get("/leaderboard").get_json()
-@@ -162,7 +178,7 @@ def test_leaderboard_falls_back_to_members_with_leads_when_kpi_is_unavailable(cl
+@@ -176,7 +192,7 @@ def test_leaderboard_falls_back_to_members_with_leads_when_kpi_is_unavailable(cl
  
  
  def test_activity_returns_counts_for_every_requested_member(client, conn):
@@ -242,7 +242,7 @@ index 9b485aa..3095a9b 100644
      service.assign_lead(conn, lead_id, 4)
      quarter = app_module.utc_today()
      quarter = f"{quarter.year}-Q{(quarter.month - 1) // 3 + 1}"
-@@ -207,6 +223,7 @@ def test_create_app_migrates_and_seeds_once(conn, monkeypatch):
+@@ -221,6 +237,7 @@ def test_create_app_migrates_and_seeds_once(conn, monkeypatch):
      app_module.create_app()
      leads = service.list_leads(conn)
      assert len(leads) == seed.LEAD_COUNT
@@ -389,48 +389,18 @@ index 84ff347..e8a1fd7 100644
  
  
 diff --git a/tests/integration/test_seam.py b/tests/integration/test_seam.py
-index bb39fb7..9bd34c0 100644
+index 4270b97..1c1f601 100644
 --- a/tests/integration/test_seam.py
 +++ b/tests/integration/test_seam.py
-@@ -47,6 +47,11 @@ def ok(response, status=200):
-     return response.json()
+@@ -57,7 +57,7 @@ def ok(response, status=200):
  
  
-+def new_lead(score):
+ def new_lead(score):
+-    body = {"source": "integration test", "score": score}
 +    body = {"contact_name": "Integration Test", "source": "integration test", "score": score}
-+    return ok(call("POST", "/api/routing/leads", json=body), 201)
-+
-+
- def ensure_target(member_id, metric, quarter, value=10):
-     """Make sure the member has a KPI on `metric` with a target this quarter; existing targets are kept."""
-     kpis = ok(call("GET", f"/api/kpi/members/{member_id}/kpis"))["kpis"]
-@@ -93,7 +98,7 @@ def test_proxy_health_needs_both_services():
- def test_new_lead_is_assigned_to_a_broker_kpi_reports_as_active(fresh_broker):
-     active = ok(call("GET", "/api/kpi/brokers/active"))["broker_ids"]
-     assert fresh_broker in active
--    created = ok(call("POST", "/api/routing/leads", json={"source": "integration test", "score": 50}), 201)
-+    created = new_lead(50)
-     assert created["assignment"] == "assigned"
-     assert created["lead"]["assigned_member_id"] in active
+     return ok(routing("POST", "/leads", json=body), 201)
  
-@@ -109,7 +114,7 @@ def test_dashboard_actuals_come_from_routing(fresh_broker):
-     # broker (e.g. made by hand in the UI) is ahead in the rotation
-     lead = None
-     for _ in range(5):
--        created = ok(call("POST", "/api/routing/leads", json={"source": "integration test", "score": 50}), 201)
-+        created = new_lead(50)
-         if created["lead"]["assigned_member_id"] == fresh_broker:
-             lead = created["lead"]
-             break
-@@ -145,7 +150,7 @@ def test_dashboard_degrades_when_routing_is_stopped():
  
- @pytest.mark.skipif(not KPI_STOPPED, reason="set SEAM_KPI_STOPPED=1 after `docker compose stop kpi`")
- def test_new_lead_is_saved_unassigned_when_kpi_is_stopped():
--    created = ok(call("POST", "/api/routing/leads", json={"source": "integration test", "score": 90}), 201)
-+    created = new_lead(90)
-     assert created["assignment"] == "skipped"
-     assert "unavailable" in created["notice"]
-     assert created["lead"]["assigned_member_id"] is None
 diff --git a/ui/js/views/lead-detail.js b/ui/js/views/lead-detail.js
 index 048ab3d..ecbd08d 100644
 --- a/ui/js/views/lead-detail.js

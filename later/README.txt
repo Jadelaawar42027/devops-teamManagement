@@ -14,9 +14,11 @@ What is here
                              the UI (form field, Contact column, lead detail)
 
 Before applying
-  1. The live app on Azure shows demo leads (http://<fqdn>/api/routing/leads returns 30).
-  2. Take the "before" evidence: a screenshot of the Leads page, and the JSON of
-     /api/routing/leads saved to a file (curl -s http://<fqdn>/api/routing/leads > before.json).
+  1. The live app on Azure shows demo leads (<routing_url>/leads returns 30; routing_url is
+     printed by the CD run, or: az containerapp show -g rg-sdd-3a -n jelaawar-ieu2023-routing
+     --query properties.configuration.ingress.fqdn -o tsv).
+  2. Take the "before" evidence: a screenshot of the Leads page, and the JSON of the leads
+     saved to a file (curl -s https://<routing fqdn>/leads > before.json).
 
 Apply (from the repository root, on a new branch)
   git switch -c migration-002-contact-name
@@ -31,6 +33,6 @@ Check locally
                                   leads show "Lead #<id>" as their contact)
 
 Then commit, push, open a PR, and merge. CD deploys it. Take the "after" evidence: the CD run
-link, the routing startup log line from the VM
-  (sudo docker compose -f /opt/app/deploy/docker-compose.prod.yml logs routing | grep migration),
-and /api/routing/leads again (same ids, sources and scores, now with contact_name).
+link, the routing startup log line
+  (az containerapp logs show -g rg-sdd-3a -n jelaawar-ieu2023-routing --type console --tail 300 | grep migrat),
+and the leads again (same ids, sources and scores, now with contact_name).

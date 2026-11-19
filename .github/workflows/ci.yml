@@ -85,6 +85,9 @@ jobs:
     needs: service
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      KPI_URL: http://localhost:8001
+      ROUTING_URL: http://localhost:8002
     steps:
       - uses: actions/checkout@v7
 
@@ -95,45 +98,40 @@ jobs:
       - name: Install test tools
         run: pip install -r tests/integration/requirements.txt
 
-      # the real stack: SQL Server, db-init, kpi, routing, ui and the nginx proxy
+      # the real stack: SQL Server, db-init, kpi, routing and the ui (stock nginx)
       - name: Start the stack
         run: docker compose up -d --build
 
-      # the proxy's /health is 200 only when both services (and their databases) are healthy
-      - name: Wait until both services are up
-        run: timeout 300 bash -c 'until curl -fsS http://localhost:8080/health; do sleep 5; done'
+      - name: Wait until both services are healthy
+        run: timeout 300 bash -c "until curl -fsS $KPI_URL/health && curl -fsS $ROUTING_URL/health; do sleep 5; done"
 
       - name: Both services up
-        env:
-          STACK_URL: http://localhost:8080
         run: pytest tests/integration -v
 
       - name: Routing stopped (dashboard degrades)
         env:
-          STACK_URL: http://localhost:8080
           SEAM_ROUTING_STOPPED: "1"
         run: |
           docker compose stop routing
           pytest tests/integration -v
           docker compose start routing
-          timeout 120 bash -c 'until curl -fsS http://localhost:8080/health; do sleep 3; done'
+          timeout 120 bash -c "until curl -fsS $ROUTING_URL/health; do sleep 3; done"
 
       - name: KPI stopped (lead saved unassigned)
         env:
-          STACK_URL: http://localhost:8080
           SEAM_KPI_STOPPED: "1"
         run: |
           docker compose stop kpi
           pytest tests/integration -v
           docker compose start kpi
-          timeout 120 bash -c 'until curl -fsS http://localhost:8080/health; do sleep 3; done'
+          timeout 120 bash -c "until curl -fsS $KPI_URL/health; do sleep 3; done"
 
       # assignment §4.2: migrations are recorded, so a second boot applies nothing
       - name: A restart applies no migrations
         run: |
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose restart kpi routing
-          timeout 120 bash -c 'until curl -fsS http://localhost:8080/health; do sleep 3; done'
+          timeout 120 bash -c "until curl -fsS $KPI_URL/health && curl -fsS $ROUTING_URL/health; do sleep 3; done"
           docker compose logs --no-color --since "$since" kpi routing > restart.log
           grep migrate restart.log
           if [ "$(grep -c 'migrations up to date' restart.log)" -ne 2 ]; then
@@ -187,13 +185,7 @@ jobs:
         run: openapi-spec-validator services/kpi/openapi.yaml services/routing/openapi.yaml
 
       - name: system.yaml matches system.schema.json
-        run: |
-          if [ -f system.schema.json ]; then
-            check-jsonschema --schemafile system.schema.json system.yaml
-          else
-            echo "::warning file=system.yaml::system.schema.json is missing from the repository root; only checking that system.yaml is valid YAML"
-            python -c "import sys, yaml; yaml.safe_load(open('system.yaml')); print('system.yaml parses')"
-          fi
+        run: check-jsonschema --schemafile system.schema.json system.yaml
 
       - name: Lint workflows (actionlint)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color

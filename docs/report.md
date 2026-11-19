@@ -2,13 +2,13 @@
 
 **Student:** Jad El Aawar (jelaawar.ieu2023) · **Course:** Software Development & DevOps, Assignment 2
 **Repository:** https://github.com/Jadelaawar42027/devops-teamManagement · **Graded commit:** `submission` tag, SHA [EVIDENCE: full SHA of the tagged commit]
-**Live URL:** http://jelaawar-ieu2023.westeurope.cloudapp.azure.com [EVIDENCE: confirm it answers after the final deploy]
+**Live URL:** https://TODO.azurestaticapps.net, the Static Web App `jelaawar-ieu2023-ui` [EVIDENCE: replace with the exact `ui_url` and confirm it answers after the final deploy]
 
 > Draft. Every `[EVIDENCE: ...]` marks a screenshot, link or log I still have to take. Replace each one and delete this note before exporting to PDF (4-5 pages).
 
 ## 1. What changed, in one paragraph
 
-Assignment 1 was one Flask app with two packages, `kpi` and `routing`, sharing one SQLite file and rendering Jinja pages. Assignment 2 splits it along the seam I drew in ADR-2 into two services, each with its own container, its own SQL Server database and its own database user. A static front end replaces the templates. Everything runs locally with `docker compose up --build`. On Azure it runs on infrastructure created entirely by Terraform from the CD pipeline: a VM behind a load balancer, a DNS zone, and two serverless SQL databases. That replaces Container Apps and Static Web Apps because of the professor's extra requirement (ADR-8). Every push is tested, and every merge to `main` is deployed with no manual step.
+Assignment 1 was one Flask app with two packages, `kpi` and `routing`, sharing one SQLite file and rendering Jinja pages. Assignment 2 splits it along the seam I drew in ADR-2 into two services, each with its own container, its own SQL Server database and its own database user. A static front end replaces the templates. Everything runs locally with `docker compose up --build`. On Azure it runs on pay-per-use infrastructure created entirely by Terraform from the CD pipeline: two Container Apps that scale to zero, two serverless SQL databases, and a Static Web App for the UI (ADR-8). Every push is tested, and every merge to `main` is deployed with no manual step.
 
 ## 2. Architecture before and after
 
@@ -28,14 +28,13 @@ flowchart TB
   U[Browser] -->|HTML forms| Monolith
 ```
 
-**After (Assignment 2): two services, two databases, HTTP across the seam.**
+**After (Assignment 2): two services, two databases, HTTP across the seam.** The browser loads the static UI, then calls each service directly. Locally that is ports 8001 and 8002; on Azure, each Container App's HTTPS URL. Each service accepts the UI's origin only (CORS).
 
 ```mermaid
 flowchart LR
-  U[Browser] -->|HTTP :80| P[nginx proxy]
-  P -->|"/"| UI[ui: static HTML/CSS/JS]
-  P -->|"/api/kpi/*"| K[KPI service<br/>Flask + gunicorn]
-  P -->|"/api/routing/*"| R[Routing service<br/>Flask + gunicorn]
+  U[Browser] -->|loads| UI[ui: static HTML/CSS/JS<br/>nginx locally, Static Web App on Azure]
+  U -->|"HTTP(S) + CORS"| K[KPI service<br/>Flask + gunicorn]
+  U -->|"HTTP(S) + CORS"| R[Routing service<br/>Flask + gunicorn]
   K -- "GET /activity?quarter=&member_ids=<br/>timeout 2 s" --> R
   R -- "GET /brokers/active<br/>timeout 2 s" --> K
   K --> KD[(kpi database<br/>user kpi_svc)]
@@ -44,8 +43,8 @@ flowchart LR
 
 The seam held (ADR-6). Exactly two endpoints cross it, both called server side:
 
-- **Dashboard** (`GET /api/kpi/dashboard`): KPI reads targets from its own database, then makes one bulk call to routing's `/activity` for the actuals. If routing does not answer within 2 s, the dashboard still answers 200, with every target shown, `actual` and `percent` set to null, and a notice.
-- **New lead** (`POST /api/routing/leads`): routing saves the lead, then asks KPI's `/brokers/active` who can take it. If KPI is down, the lead stays saved without a broker and the response says so. The leaderboard falls back to every member who has leads.
+- **Dashboard** (KPI `GET /dashboard`): KPI reads targets from its own database, then makes one bulk call to routing's `/activity` for the actuals. If routing does not answer within 2 s, the dashboard still answers 200, with every target shown, `actual` and `percent` set to null, and a notice.
+- **New lead** (routing `POST /leads`): routing saves the lead, then asks KPI's `/brokers/active` who can take it. If KPI is down, the lead stays saved without a broker and the response says so. The leaderboard falls back to every member who has leads.
 
 What changed from ADR-2: the per-member `activity_counts()` became a bulk endpoint, so a down routing service costs the dashboard one 2-second timeout instead of one per member. Member names are joined in the browser from KPI's `/members`, and shown as `#id` when KPI is down. The cross-domain foreign key that never existed (ADR-3) is enforced in code: routing only assigns ids it just got from KPI, and KPI only deactivates members, never deletes them (ADR-7).
 
@@ -58,33 +57,46 @@ flowchart LR
     CI -- "success on main<br/>(workflow_run)" --> CD[CD workflow]
   end
   CD -- "push :SHA" --> GHCR[(GHCR<br/>ghcr.io/jadelaawar42027/kpi<br/>ghcr.io/jadelaawar42027/routing)]
-  CD -- "terraform plan + apply" --> TF[(State: storage account<br/>jelaawarieu2023tfstate)]
-  CD -- "az vm run-command:<br/>compose pull + up -d" --> VM
-  CD -- "poll /health ≤ 3 min" --> LB
-  subgraph Azure["Azure: class resource group"]
-    DNS[DNS zone jelaawar-ieu2023.devops.ie<br/>A record app] -.-> PIP
-    PIP[Public IP jelaawar-ieu2023-lb-ip<br/>jelaawar-ieu2023.westeurope.cloudapp.azure.com] --- LB[Load balancer jelaawar-ieu2023-lb<br/>rule 80 · probe /lb-probe · NAT 50022→22 · outbound]
-    LB --> VM["VM jelaawar-ieu2023-vm (Ubuntu 24.04, B2s)<br/>containers: proxy · ui · kpi · routing"]
-    VM --> SQL[SQL server jelaawar-ieu2023-sql]
+  CD -- "terraform plan + apply" --> TF[(Terraform state<br/>storage provided by the professor)]
+  CD -- "config.js + deploy ui/<br/>(deployment token)" --> WEB
+  CD -- "poll /health ≤ 3 min" --> K
+  subgraph Azure["Azure: resource group rg-sdd-3a"]
+    WEB[Static Web App, Free<br/>jelaawar-ieu2023-ui]
+    subgraph ENV["Container Apps environment jelaawar-ieu2023-env (Consumption)"]
+      K[jelaawar-ieu2023-kpi<br/>0-1 replicas, HTTPS]
+      R[jelaawar-ieu2023-routing<br/>0-1 replicas, HTTPS]
+    end
+    SQL[SQL server jelaawar-ieu2023-sql]
     SQL --- D1[(jelaawar-ieu2023-kpi-db<br/>serverless)]
     SQL --- D2[(jelaawar-ieu2023-routing-db<br/>serverless)]
+    K --> D1
+    R --> D2
+    K <-->|HTTPS, 2 s timeout| R
   end
-  GHCR -. "docker pull" .-> VM
+  GHCR -. "image pull at start" .-> ENV
+  U[Browser] -->|HTTPS| WEB
+  U -->|HTTPS + CORS| K
+  U -->|HTTPS + CORS| R
 ```
 
-Terraform in `infra/terraform/` creates these resources: the virtual network, subnet and NSG (port 80 open, SSH only from my IP), the VM (with no public IP of its own), the Standard load balancer with a static public IP, the DNS zone, the SQL server, and two GP_S_Gen5_1 databases (0.5 to 1 vCore, auto-pause after 15 minutes, 2 GB, locally redundant backups). Its state lives in an Azure storage account, so a pipeline run and my laptop see the same state and cannot apply at the same time.
+Terraform in `infra/terraform/` creates 8 resources in the class resource group (read through a data source, never created), and nothing else:
 
-Three design points matter for cost and correctness:
+- the SQL server, its two GP_S_Gen5_1 databases (0.5 to 1 vCore, auto-pause after 15 minutes, 2 GB, locally redundant backups) and an "allow Azure services" firewall rule;
+- the Container Apps environment and the two apps;
+- the Static Web App on the Free tier.
 
-- **The probe must not touch the database.** The load balancer probes `/lb-probe`, which nginx answers itself. Probing `/health` every 15 seconds would write to both databases forever, so they would never auto-pause, and serverless compute would bill around the clock. For the same reason, the production containers have no Docker healthcheck.
-- **Cold database, warm containers.** The VM is always on, so there is no container cold start. But the first request after 15 idle minutes finds a paused database, which refuses connections (error 40613) for up to about a minute. `db.py` retries with backoff for about 60 seconds, nginx waits up to 90 seconds, and the post-deploy check allows 3 minutes.
-- **Migrations at startup run exactly once.** gunicorn `--preload` runs them before forking workers, and each service has exactly one container, so two copies never race.
+The Terraform state lives in a storage account provided by the professor, so every pipeline run sees the same state and two runs cannot apply at once. Everything is pay-per-use. An idle system costs only the databases' storage: no Log Analytics workspace (it bills per GB), no Azure container registry.
 
-The DNS zone is real but not delegated, because I own no domain. It is proven by asking its own name server, which CD also checks on every run:
+Two design points follow from scale to zero:
 
-[EVIDENCE: terminal screenshot of `nslookup app.jelaawar-ieu2023.devops.ie <ns1-xx.azure-dns.com>` returning the load balancer IP]
+- **Cold starts are expected.** The first request after a quiet period starts a container, which may find its database paused: up to about a minute of error 40613. `db.py` retries with backoff (about 90 seconds), the UI waits up to 90 seconds before showing an error, and the post-deploy check allows 3 minutes. A call to the other service keeps its 2-second timeout. If that service is still at zero replicas, the call degrades exactly as if it were down, and wakes it for the next request.
+- **Nothing polls the database.** No health probe calls `/health`, because it writes to the database and would keep it from ever pausing. `max_replicas = 1` also means the migrations that run at startup can never run twice at once.
 
-[EVIDENCE: Azure portal screenshot of the resource group filtered to `jelaawar-ieu2023`, showing the VM, load balancer, public IP, DNS zone, SQL server and both databases]
+The Container Apps environment is the one resource beyond the brief's allowance (2 Container Apps, 2 serverless databases, 1 Static Web App). Container Apps cannot run without one, the brief's own `system.yaml` example names it, and on the Consumption plan it costs nothing by itself (ADR-8).
+
+[EVIDENCE: Azure portal screenshot of `rg-sdd-3a` filtered to `jelaawar`, showing the Container Apps environment, both Container Apps, the SQL server, both databases and the Static Web App, and nothing else]
+
+[EVIDENCE: screenshot of a Container App's "Scale" page showing min 0 / max 1 replicas, and of a database's "Compute + storage" page showing serverless with auto-pause after 15 minutes]
 
 ## 4. Database per service
 
@@ -160,9 +172,9 @@ The three steps are separate `GO` batches inside one transaction, so a failure l
 
 | Step | Evidence |
 | --- | --- |
-| Data before 002 | [EVIDENCE: `/api/routing/leads` JSON or Leads page screenshot from Azure: lead ids, sources, scores, no contact_name] |
+| Data before 002 | [EVIDENCE: routing `GET /leads` JSON or Leads page screenshot from Azure: lead ids, sources, scores, no contact_name] |
 | Deployment run | [EVIDENCE: link to the CD run that deployed 002, and its commit SHA] |
-| Startup log line | [EVIDENCE: `sudo docker compose -f /opt/app/deploy/docker-compose.prod.yml logs routing \| grep migration` showing `applied migration 002_add_contact_name.sql`, once] |
+| Startup log line | [EVIDENCE: `az containerapp logs show -g rg-sdd-3a -n jelaawar-ieu2023-routing --type console --tail 300 \| grep migrat` showing `applied migration 002_add_contact_name.sql`, once] |
 | Data after 002 | [EVIDENCE: the same leads, same ids, sources and scores, now with `contact_name = "Lead #<id>"`; plus a new lead created with a real contact name] |
 | Second boot applies nothing | [EVIDENCE: log line `migrations up to date (2 applied)` after a restart or the next deploy] |
 
@@ -174,14 +186,37 @@ With one service stopped, the other keeps serving its own domain, and the flow a
 
 | Situation | What the user sees | Evidence |
 | --- | --- | --- |
-| Routing stopped, Dashboard | Every target still listed. Actuals show "unavailable", with the banner "Routing service unavailable: targets are shown without actuals." The API answers 200 with `activity_available: false`. | [EVIDENCE: screenshot of the dashboard with routing stopped, plus the JSON of `/api/kpi/dashboard`] |
-| Routing stopped, Leads page | A clear error banner instead of a blank page. The proxy answers `503 {"error": "Routing service unavailable"}` at once, without hanging. | [EVIDENCE: screenshot] |
+| Routing stopped, Dashboard | Every target still listed. Actuals show "unavailable", with the banner "Routing service unavailable: targets are shown without actuals." The API answers 200 with `activity_available: false`. | [EVIDENCE: screenshot of the dashboard with routing stopped, plus the JSON of KPI `GET /dashboard`] |
+| Routing stopped, Leads page | A clear error banner instead of a blank page. The browser's call to the stopped service fails at once (connection refused), and the UI turns it into "Could not reach the routing service", without hanging. | [EVIDENCE: screenshot] |
 | KPI stopped, Add lead | The lead is saved. The result card says "Saved without a broker: KPI service unavailable", and the API answers 201 with `assignment: "skipped"`. | [EVIDENCE: screenshot of the result card, plus the JSON] |
 | KPI stopped, Leads / Leaderboard | Brokers appear as `#id`, with a "Broker names unavailable" notice. The leaderboard notice says it ranks every member with leads. | [EVIDENCE: screenshot] |
 
-[EVIDENCE: say where each screenshot was taken: local compose (`docker compose stop routing`) or Azure (stopping a container over SSH)]
+[EVIDENCE: say where each screenshot was taken: local compose (`docker compose stop routing`), or Azure (`az containerapp revision deactivate` on one app, then activate it again)]
 
 ## 7. Pipeline evidence
+
+```mermaid
+flowchart TB
+  P[push or pull request] --> CI
+  subgraph CI["CI (.github/workflows/ci.yml): every push and PR"]
+    direction LR
+    S1["kpi + routing (matrix)<br/>ruff · pytest vs SQL Server container<br/>coverage ≥ 70% · docker build"]
+    S2["integration<br/>compose stack: both up,<br/>routing stopped, kpi stopped,<br/>restart applies no migration"]
+    S3[terraform fmt + validate]
+    S4[OpenAPI + system.yaml schema<br/>+ actionlint]
+    S1 --> S2
+  end
+  CI -- "success, push to main (workflow_run)" --> CD
+  subgraph CD["CD (.github/workflows/cd.yml): the commit CI tested"]
+    direction LR
+    D1[images: build + push<br/>ghcr.io/…/kpi:SHA, routing:SHA] --> D2[terraform apply<br/>databases first]
+    D2 --> D3[create/update DB users<br/>temporary firewall rule]
+    D3 --> D4[terraform plan + apply<br/>Container Apps → :SHA]
+    D4 --> D5[config.js + deploy ui/<br/>to the Static Web App]
+    D5 --> D6[poll both /health ≤ 3 min<br/>200 and version = SHA]
+  end
+```
+
 
 | What | Evidence |
 | --- | --- |
@@ -197,12 +232,12 @@ With one service stopped, the other keeps serving its own domain, and the flow a
 - `terraform fmt` and `validate`;
 - OpenAPI validation of both documents, `system.yaml` against `system.schema.json`, and actionlint.
 
-CI never connects to Azure SQL. **CD** starts only after CI succeeded for a push to `main`, and deploys exactly that commit's SHA. Secrets (the service principal, the SQL passwords) live only in GitHub secrets. On the VM they exist only in a root-only `.env`.
+CI never connects to Azure SQL. **CD** starts only after CI succeeded for a push to `main`, and deploys exactly that commit's SHA. Secrets (the service principal, the SQL passwords) live only in GitHub secrets. On Azure the database URLs are Container App secrets, never plain environment variables.
 
 ## 8. Decisions and limits
 
-- **Hosting** (ADR-8): a VM and a load balancer are fixed monthly costs, unlike the brief's scale-to-zero design; only the databases pause. This was the price of the professor's requirement. At 100x traffic it would need a scale set of VMs, migrations moved out of startup, and auto-pause turned off.
-- **No login** (ADR-10): the public deployment has no authentication and holds demo data only. HTTPS comes first, then single sign-on at the proxy, as soon as real data goes in.
+- **Hosting** (ADR-8): everything is pay-per-use and scales to zero, paid for with cold starts of up to about a minute. At 100x traffic: a minimum of one replica and more maximum replicas, migrations moved into a pipeline step so replicas cannot race, auto-pause off, and a cache for the dashboard.
+- **No login** (ADR-10): the public deployment has no authentication and holds demo data only. Entra ID sign-in, with both services checking the token, comes as soon as real data goes in.
 - **Not tested automatically:** the browser UI (checked by hand at desktop and mobile widths), Terraform against real Azure, and a real resume from auto-pause.
 
 ## 9. AI disclosure

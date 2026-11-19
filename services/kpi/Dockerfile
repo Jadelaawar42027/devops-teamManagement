@@ -23,5 +23,5 @@ EXPOSE 8000
 # --preload runs create_app() once in the master before forking the workers,
 # so migrations run once per container, not once per worker.
 # --threads: a request waiting up to ~60s for a paused Azure SQL database to resume holds a
-# thread, not a whole worker, so /health (the load balancer probe) still answers meanwhile.
+# thread, not a whole worker, so /health (the pipeline's health check) still answers meanwhile.
 CMD ["sh", "-c", "exec gunicorn --preload --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:${PORT} 'app:create_app()'"]
