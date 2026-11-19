@@ -1,12 +1,12 @@
-# CD: deploys to Azure after CI passed on a push to main, and only then.
-#   images        build both service images and push them to GHCR, tagged with the commit SHA
-#   infra         terraform plan + apply (VM, load balancer, DNS, SQL), remote state in Azure
-#   db-users      create/update each service's contained database user (idempotent)
-#   deploy        ship the compose file, nginx.conf, ui/ and a .env built from secrets to the
-#                 VM and run docker compose pull + up -d there (az vm run-command)
-#   verify        poll http://<fqdn>/health for up to 3 minutes; fail unless 200 with this SHA
+# CD: deploys to Azure after CI passed on a push to main, and only then (assignment §5, §7).
+#   images   build both service images and push them to GHCR, tagged with the commit SHA
+#   deploy   terraform: the databases first, then the contained database users, then
+#            everything else, which updates both Container Apps to the new image tag
+#   ui       generate ui/config.js with the two Container Apps' URLs and deploy ui/ to the
+#            Static Web App with its deployment token (a GitHub secret)
+#   verify   poll both services' /health for up to 3 minutes; fail unless 200 with this SHA
 #
-# Secrets and variables it needs are listed in README.md ("Deployment").
+# Secrets and variables it needs are listed in README.md ("GitHub secrets and variables").
 name: CD
 
 on:
@@ -17,7 +17,7 @@ on:
 
 permissions:
   contents: read
-  packages: write # push images to GHCR; the VM pulls them with this run's token
+  packages: write # push images to GHCR
 
 # never two deploys at once, and never cancel one halfway through a terraform apply
 concurrency:
@@ -29,6 +29,7 @@ env:
   SHA: ${{ github.event.workflow_run.head_sha }}
   TF_DIR: infra/terraform
   TF_VERSION: 1.17.2
+  PREFIX: jelaawar-ieu2023
 
 jobs:
   images:
@@ -71,9 +72,9 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  infra:
-    name: terraform apply
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+  deploy:
+    name: terraform + UI
+    needs: images
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -87,22 +88,20 @@ jobs:
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       # Terraform input variables (TF_VAR_<name>)
       TF_VAR_resource_group_name: ${{ vars.AZURE_RESOURCE_GROUP }}
-      TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
-      TF_VAR_ssh_public_key: ${{ vars.VM_SSH_PUBLIC_KEY }}
+      TF_VAR_image_tag: ${{ github.event.workflow_run.head_sha }}
       TF_VAR_sql_admin_password: ${{ secrets.SQL_ADMIN_PASSWORD }}
+      TF_VAR_kpi_db_password: ${{ secrets.KPI_DB_PASSWORD }}
+      TF_VAR_routing_db_password: ${{ secrets.ROUTING_DB_PASSWORD }}
+      # empty unless the GHCR packages are private (see infra/bootstrap.md)
+      TF_VAR_registry_username: ${{ secrets.GHCR_PULL_USER }}
+      TF_VAR_registry_password: ${{ secrets.GHCR_PULL_TOKEN }}
+      TF_VAR_seed_demo: ${{ vars.SEED_DEMO || '1' }}
       TF_IN_AUTOMATION: "true"
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
     outputs:
-      resource_group: ${{ steps.out.outputs.resource_group }}
-      vm_name: ${{ steps.out.outputs.vm_name }}
-      fqdn: ${{ steps.out.outputs.fqdn }}
-      public_ip: ${{ steps.out.outputs.public_ip }}
-      sql_server_name: ${{ steps.out.outputs.sql_server_name }}
-      sql_server_fqdn: ${{ steps.out.outputs.sql_server_fqdn }}
-      sql_admin_login: ${{ steps.out.outputs.sql_admin_login }}
-      kpi_database: ${{ steps.out.outputs.kpi_database }}
-      routing_database: ${{ steps.out.outputs.routing_database }}
-      dns_zone: ${{ steps.out.outputs.dns_zone }}
-      dns_name_server: ${{ steps.out.outputs.dns_name_server }}
+      kpi_url: ${{ steps.out.outputs.kpi_url }}
+      routing_url: ${{ steps.out.outputs.routing_url }}
+      ui_url: ${{ steps.out.outputs.ui_url }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -113,7 +112,18 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      # the backend block in providers.tf is empty; where the state lives comes from secrets
+      - uses: azure/login@v3
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pip install pymssql==2.4.6
+
+      # The backend block in providers.tf is empty. The state storage account is provided by
+      # the professor; where it is comes from secrets.
       - name: terraform init (remote state)
         run: >-
           terraform init -input=false
@@ -122,6 +132,42 @@ jobs:
           -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}"
           -backend-config="key=jelaawar-ieu2023.tfstate"
 
+      # The apps connect as their own contained database users, which can only be created
+      # once the databases exist. So the databases go first, then the users, then the rest.
+      # On every later deploy this step finds nothing to change.
+      - name: terraform apply, databases only
+        run: |
+          terraform plan -input=false -lock-timeout=5m -out=databases.tfplan \
+            -target=azurerm_mssql_database.service -target=azurerm_mssql_firewall_rule.azure_services
+          terraform apply -input=false -lock-timeout=5m databases.tfplan
+
+      # The SQL firewall only lets in Azure services. Open it for this runner's IP while the
+      # users are created, and always close it again afterwards.
+      - name: Open the SQL firewall for this runner
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          az sql server firewall-rule create --resource-group "$RESOURCE_GROUP" --server "$PREFIX-sql" \
+            --name "gha-cd-${{ github.run_id }}" --start-ip-address "$ip" --end-ip-address "$ip" --output none
+
+      - name: Create or update the contained database users
+        working-directory: .
+        env:
+          SQL_SERVER_FQDN: ${{ env.PREFIX }}-sql.database.windows.net
+          SQL_ADMIN_LOGIN: jelaawar_sqladmin # sql_admin_login in variables.tf
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+          KPI_DATABASE: ${{ env.PREFIX }}-kpi-db
+          KPI_DB_PASSWORD: ${{ secrets.KPI_DB_PASSWORD }}
+          ROUTING_DATABASE: ${{ env.PREFIX }}-routing-db
+          ROUTING_DB_PASSWORD: ${{ secrets.ROUTING_DB_PASSWORD }}
+        run: python infra/scripts/create_db_users.py
+
+      - name: Close the SQL firewall again
+        if: always()
+        run: |
+          az sql server firewall-rule delete --resource-group "$RESOURCE_GROUP" --server "$PREFIX-sql" \
+            --name "gha-cd-${{ github.run_id }}" --output none || true
+
+      # everything else: Container Apps environment, both apps on the new image tag, Static Web App
       - name: terraform plan
         run: terraform plan -input=false -lock-timeout=5m -out=tfplan
 
@@ -134,188 +180,90 @@ jobs:
         run: |
           terraform output -json > outputs.json
           {
-            echo "resource_group=$(jq -r .resource_group_name.value outputs.json)"
-            echo "vm_name=$(jq -r .vm_name.value outputs.json)"
-            echo "fqdn=$(jq -r .fqdn.value outputs.json)"
-            echo "public_ip=$(jq -r .public_ip.value outputs.json)"
-            echo "sql_server_name=$(jq -r .sql_server_name.value outputs.json)"
-            echo "sql_server_fqdn=$(jq -r .sql_server_fqdn.value outputs.json)"
-            echo "sql_admin_login=$(jq -r .sql_admin_login.value outputs.json)"
-            echo "kpi_database=$(jq -r .kpi_database_name.value outputs.json)"
-            echo "routing_database=$(jq -r .routing_database_name.value outputs.json)"
-            echo "dns_zone=$(jq -r .dns_zone_name.value outputs.json)"
-            echo "dns_name_server=$(jq -r '.dns_name_servers.value[0]' outputs.json)"
+            echo "kpi_url=$(jq -r .kpi_url.value outputs.json)"
+            echo "routing_url=$(jq -r .routing_url.value outputs.json)"
+            echo "ui_url=$(jq -r .ui_url.value outputs.json)"
           } >> "$GITHUB_OUTPUT"
 
-  db-users:
-    name: database users
-    needs: infra
+  ui:
+    name: deploy the UI to the Static Web App
+    needs: deploy
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      RESOURCE_GROUP: ${{ needs.infra.outputs.resource_group }}
-      SQL_SERVER: ${{ needs.infra.outputs.sql_server_name }}
-      RULE: gha-cd-${{ github.run_id }}
+      KPI_URL: ${{ needs.deploy.outputs.kpi_url }}
+      ROUTING_URL: ${{ needs.deploy.outputs.routing_url }}
+      SWA_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.SHA }}
 
-      - uses: azure/login@v3
-        with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - run: pip install pymssql==2.4.6
-
-      # The SQL firewall only lets in Azure services and the VM. Open it for this runner's IP
-      # while the users are created, and always close it again afterwards.
-      - name: Open the SQL firewall for this runner
+      # The deployment token only exists once Terraform has created the Static Web App, so on
+      # the very first deploy the secret is still empty: say exactly what to do.
+      - name: Check the deployment token secret
         run: |
-          ip=$(curl -fsS https://api.ipify.org)
-          az sql server firewall-rule create --resource-group "$RESOURCE_GROUP" --server "$SQL_SERVER" \
-            --name "$RULE" --start-ip-address "$ip" --end-ip-address "$ip" --output none
+          if [ -z "$SWA_TOKEN" ]; then
+            echo "::error::Secret AZURE_STATIC_WEB_APPS_API_TOKEN is empty. Get the token with: az staticwebapp secrets list -g <resource group> -n jelaawar-ieu2023-ui --query properties.apiKey -o tsv, set it with gh secret set AZURE_STATIC_WEB_APPS_API_TOKEN, then re-run this job."
+            exit 1
+          fi
 
-      - name: Create or update the contained users
-        env:
-          SQL_SERVER_FQDN: ${{ needs.infra.outputs.sql_server_fqdn }}
-          SQL_ADMIN_LOGIN: ${{ needs.infra.outputs.sql_admin_login }}
-          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
-          KPI_DATABASE: ${{ needs.infra.outputs.kpi_database }}
-          KPI_DB_PASSWORD: ${{ secrets.KPI_DB_PASSWORD }}
-          ROUTING_DATABASE: ${{ needs.infra.outputs.routing_database }}
-          ROUTING_DB_PASSWORD: ${{ secrets.ROUTING_DB_PASSWORD }}
-        run: python deploy/create_db_users.py
-
-      - name: Close the SQL firewall again
-        if: always()
+      # The UI is the same files as locally, except config.js, which gets the two Container
+      # Apps' URLs instead of localhost.
+      - name: Generate config.js
         run: |
-          az sql server firewall-rule delete --resource-group "$RESOURCE_GROUP" --server "$SQL_SERVER" \
-            --name "$RULE" --output none || true
-
-  deploy:
-    name: deploy to the VM
-    needs: [images, infra, db-users]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      RESOURCE_GROUP: ${{ needs.infra.outputs.resource_group }}
-      VM_NAME: ${{ needs.infra.outputs.vm_name }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.SHA }}
-
-      - uses: azure/login@v3
-        with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
-
-      # Same layout as the repository, so the relative paths in the compose file work:
-      # bundle/deploy/{docker-compose.prod.yml,nginx.conf,.env} and bundle/ui/
-      - name: Bundle the files for the VM
-        env:
-          SQL_SERVER_FQDN: ${{ needs.infra.outputs.sql_server_fqdn }}
-          KPI_DATABASE: ${{ needs.infra.outputs.kpi_database }}
-          ROUTING_DATABASE: ${{ needs.infra.outputs.routing_database }}
-          KPI_DB_PASSWORD: ${{ secrets.KPI_DB_PASSWORD }}
-          ROUTING_DB_PASSWORD: ${{ secrets.ROUTING_DB_PASSWORD }}
-          SEED_DEMO: ${{ vars.SEED_DEMO || '1' }}
-        run: |
-          mkdir -p bundle/deploy
-          cp deploy/docker-compose.prod.yml deploy/nginx.conf bundle/deploy/
-          cp -R ui bundle/ui
-          # passwords are URL-encoded so characters like @ : / $ cannot break the URL or
-          # be read by compose as variables; the result is never printed
-          python3 - > bundle/deploy/.env <<'EOF'
-          import os
-          from urllib.parse import quote
-
-          def url(user, password_var, database_var):
-              password = quote(os.environ[password_var], safe="")
-              return f"mssql://{user}:{password}@{os.environ['SQL_SERVER_FQDN']}:1433/{os.environ[database_var]}"
-
-          print(f"GHCR_OWNER={os.environ['GITHUB_REPOSITORY_OWNER'].lower()}")
-          print(f"IMAGE_TAG={os.environ['SHA']}")
-          print(f"SEED_DEMO={os.environ['SEED_DEMO']}")
-          print(f"KPI_DATABASE_URL={url('kpi_svc', 'KPI_DB_PASSWORD', 'KPI_DATABASE')}")
-          print(f"ROUTING_DATABASE_URL={url('routing_svc', 'ROUTING_DB_PASSWORD', 'ROUTING_DATABASE')}")
+          mkdir -p build
+          cp -R ui build/ui
+          cat > build/ui/config.js <<EOF
+          // Generated by the CD pipeline for commit ${SHA}.
+          window.APP_CONFIG = {
+            KPI_URL: "${KPI_URL}",
+            ROUTING_URL: "${ROUTING_URL}",
+          };
           EOF
-          tar -czf bundle.tgz -C bundle .
-          echo "bundle: $(wc -c < bundle.tgz) bytes"
+          cat build/ui/config.js
 
-      # The script runs as root on the VM through the Azure agent (no SSH needed). The bundle
-      # and a GHCR token that expires when this job ends are embedded in it.
-      - name: Write the deploy script
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bundle=$(base64 -w0 bundle.tgz)
-          cat > deploy.sh <<EOF
-          set -euo pipefail
-          # first deploy on a new VM: wait until cloud-init has installed Docker
-          cloud-init status --wait > /dev/null || true
-          command -v docker > /dev/null || { echo "docker is not installed"; exit 1; }
-          install -m 0750 -d /opt/app
-          cd /opt/app
-          rm -rf ui
-          echo '${bundle}' | base64 -d | tar -xz -C /opt/app
-          chmod 600 deploy/.env
-          cd deploy
-          echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin > /dev/null
-          docker compose -f docker-compose.prod.yml pull --quiet
-          docker compose -f docker-compose.prod.yml up -d --remove-orphans
-          docker logout ghcr.io > /dev/null
-          docker image prune -f > /dev/null
-          docker compose -f docker-compose.prod.yml ps
-          echo DEPLOY_OK
-          EOF
-
-      # run-command reports success even when the script fails, so the script's own
-      # DEPLOY_OK marker decides
-      - name: Run it on the VM
-        run: |
-          az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
-            --command-id RunShellScript --scripts @deploy.sh \
-            --query 'value[0].message' --output tsv > result.txt
-          cat result.txt
-          grep -q DEPLOY_OK result.txt
+      - uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          action: upload
+          app_location: build/ui
+          skip_app_build: true
+          skip_api_build: true
 
   verify:
     name: health check
-    needs: [infra, deploy]
+    needs: [deploy, ui]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      FQDN: ${{ needs.infra.outputs.fqdn }}
+      KPI_URL: ${{ needs.deploy.outputs.kpi_url }}
+      ROUTING_URL: ${{ needs.deploy.outputs.routing_url }}
+      UI_URL: ${{ needs.deploy.outputs.ui_url }}
     steps:
-      # 3 minutes: a paused database takes up to about a minute to resume, then each
-      # service runs its pending migrations before it answers
-      - name: Poll /health until 200 with this commit's version
+      # 3 minutes: each app starts from zero replicas, its database may be paused (up to about
+      # a minute to resume), and it runs any pending migrations before it answers (§7.5)
+      - name: Poll both services' /health until 200 with this commit's version
         run: |
           deadline=$((SECONDS + 180))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            rm -f health.json
-            code=$(curl -s -o health.json -w '%{http_code}' --max-time 10 "http://$FQDN/health" || true)
-            kpi=$(curl -s --max-time 10 "http://$FQDN/api/kpi/health" | jq -r .version 2>/dev/null || true)
-            echo "$(date -u +%T) /health=$code $(cat health.json 2>/dev/null) kpi=$kpi"
-            if [ "$code" = 200 ] && [ "$(jq -r .version health.json)" = "$SHA" ] && [ "$kpi" = "$SHA" ]; then
-              echo "deployed $SHA is healthy at http://$FQDN"
-              exit 0
-            fi
+            all_ok=true
+            for url in "$KPI_URL" "$ROUTING_URL"; do
+              rm -f health.json
+              code=$(curl -s -o health.json -w '%{http_code}' --max-time 60 "$url/health" || true)
+              version=$(jq -r .version health.json 2>/dev/null || true)
+              echo "$(date -u +%T) $url/health -> $code version=$version"
+              if [ "$code" != 200 ] || [ "$version" != "$SHA" ]; then all_ok=false; fi
+            done
+            if $all_ok; then echo "both services run $SHA and are healthy"; exit 0; fi
             sleep 10
           done
-          echo "::error::http://$FQDN/health did not return 200 for $SHA within 3 minutes"
+          echo "::error::the services did not return 200 for $SHA within 3 minutes"
           exit 1
 
-      # the zone is not delegated, so ask its own Azure name server directly
-      - name: DNS record answers from the zone's name server
-        env:
-          ZONE: ${{ needs.infra.outputs.dns_zone }}
-          NAME_SERVER: ${{ needs.infra.outputs.dns_name_server }}
-          PUBLIC_IP: ${{ needs.infra.outputs.public_ip }}
+      - name: The UI is served and points at both services
         run: |
-          nslookup "app.$ZONE" "$NAME_SERVER" | tee dns.txt
-          grep -q "$PUBLIC_IP" dns.txt
+          curl -fsS --max-time 30 "$UI_URL/" | grep -q "<title>"
+          curl -fsS --max-time 30 "$UI_URL/config.js" | tee config.js
+          grep -q "$KPI_URL" config.js && grep -q "$ROUTING_URL" config.js
+          echo "live at $UI_URL"

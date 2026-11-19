@@ -37,18 +37,12 @@ resource "azurerm_mssql_database" "service" {
   tags                        = var.tags
 }
 
-# 0.0.0.0 to 0.0.0.0 is Azure's special rule for "allow Azure services".
+# 0.0.0.0 to 0.0.0.0 is Azure's special rule for "allow Azure services": it lets in the
+# Container Apps (whose outbound IPs are Azure's and can change). The pipeline adds its own
+# runner's IP only for the minute it needs it, then removes it.
 resource "azurerm_mssql_firewall_rule" "azure_services" {
   name             = "AllowAzureServices"
   server_id        = azurerm_mssql_server.main.id
   start_ip_address = "0.0.0.0"
   end_ip_address   = "0.0.0.0"
-}
-
-# The VM's outbound traffic leaves with the load balancer's IP (outbound rule in lb.tf).
-resource "azurerm_mssql_firewall_rule" "load_balancer" {
-  name             = "${var.prefix}-lb"
-  server_id        = azurerm_mssql_server.main.id
-  start_ip_address = azurerm_public_ip.lb.ip_address
-  end_ip_address   = azurerm_public_ip.lb.ip_address
 }

@@ -1,0 +1,523 @@
+diff --git a/services/routing/app.py b/services/routing/app.py
+index b139a96..a0cb255 100644
+--- a/services/routing/app.py
++++ b/services/routing/app.py
+@@ -58,16 +58,19 @@ def create_app(migrate=True):
+         # the second flow across the seam: routing asks KPI who the active brokers are
+         data = body()
+         source = str(data.get("source", "")).strip()
++        contact_name = str(data.get("contact_name", "")).strip()
+         try:
+             score = int(data.get("score"))
+         except (TypeError, ValueError):
+             return bad_request("score must be a whole number from 0 to 100")
+         if not source:
+             return bad_request("source is required")
++        if not contact_name:
++            return bad_request("contact_name is required")
+         conn = db.get_connection()
+         try:
+             try:
+-                lead_id = service.create_lead(conn, source, score)
++                lead_id = service.create_lead(conn, source, score, contact_name)
+             except ValueError as exc:
+                 return bad_request(str(exc))
+             band = service.band_for_score(score)
+diff --git a/services/routing/openapi.yaml b/services/routing/openapi.yaml
+index 8a60cf8..be4d0d7 100644
+--- a/services/routing/openapi.yaml
++++ b/services/routing/openapi.yaml
+@@ -85,8 +85,9 @@ paths:
+           application/json:
+             schema:
+               type: object
+-              required: [source, score]
++              required: [contact_name, source, score]
+               properties:
++                contact_name: { type: string, maxLength: 200, description: "Name of the person enquiring. Trimmed; must not be empty" }
+                 source: { type: string, description: Trimmed; must not be empty }
+                 score:
+                   description: Whole number from 0 to 100 (a string holding one is accepted)
+@@ -279,9 +280,13 @@ components:
+ 
+     Lead:
+       type: object
+-      required: [id, source, score, assigned_member_id, assigned_at, created_at]
++      required: [id, contact_name, source, score, assigned_member_id, assigned_at, created_at]
+       properties:
+         id: { type: integer }
++        contact_name:
++          type: string
++          maxLength: 200
++          description: Name of the person enquiring. Leads created before migration 002 hold "Lead #<id>".
+         source: { type: string }
+         score: { type: integer, minimum: 0, maximum: 100 }
+         assigned_member_id:
+diff --git a/services/routing/seed.py b/services/routing/seed.py
+index 30b3dab..bca7c8d 100644
+--- a/services/routing/seed.py
++++ b/services/routing/seed.py
+@@ -7,6 +7,20 @@ import kpi_client
+ log = logging.getLogger(__name__)
+ 
+ SOURCES = ["website", "referral", "boat show", "phone"]
++CONTACT_NAMES = [
++    "Alex Moreau",
++    "Brigitte Lund",
++    "Carlos Vega",
++    "Dimitri Pappas",
++    "Elena Rossi",
++    "Farid Haddad",
++    "Grace Okafor",
++    "Hugo Brandt",
++    "Isla McKenzie",
++    "Jonas Eriksson",
++    "Keiko Tanaka",
++    "Luca Ferri",
++]
+ LEAD_COUNT = 30
+ AGES_IN_DAYS = [0, 1, 2, 3, 4, 6, 9, 14, 25, 40]
+ # how many stages each lead gets through: 0 = no outcome yet, 3 = closed
+@@ -48,11 +62,18 @@ def seed_demo(conn):
+         created = now - timedelta(days=AGES_IN_DAYS[i % len(AGES_IN_DAYS)], hours=i % 8)
+         cur.execute(
+             """
+-            INSERT INTO leads (source, score, assigned_member_id, assigned_at, created_at)
++            INSERT INTO leads (contact_name, source, score, assigned_member_id, assigned_at, created_at)
+             OUTPUT INSERTED.id
+-            VALUES (%s, %s, %s, %s, %s)
++            VALUES (%s, %s, %s, %s, %s, %s)
+             """,
+-            (SOURCES[i % len(SOURCES)], (i * 37 + 11) % 101, broker_ids[i % len(broker_ids)], created, created),
++            (
++                CONTACT_NAMES[i % len(CONTACT_NAMES)],
++                SOURCES[i % len(SOURCES)],
++                (i * 37 + 11) % 101,
++                broker_ids[i % len(broker_ids)],
++                created,
++                created,
++            ),
+         )
+         lead_id = cur.fetchone()["id"]
+         for stage, delay in STAGE_DELAYS[: STAGES_REACHED[i % len(STAGES_REACHED)]]:
+diff --git a/services/routing/service.py b/services/routing/service.py
+index 59d8570..abda588 100644
+--- a/services/routing/service.py
++++ b/services/routing/service.py
+@@ -23,13 +23,19 @@ def band_for_score(score):
+     return "cold"
+ 
+ 
+-def create_lead(conn, source, score):
++CONTACT_NAME_MAX = 200
++
++
++def create_lead(conn, source, score, contact_name):
+     if score < 0 or score > 100:
+         raise ValueError("score must be between 0 and 100")
++    contact_name = contact_name.strip()
++    if not contact_name or len(contact_name) > CONTACT_NAME_MAX:
++        raise ValueError(f"contact_name is required, at most {CONTACT_NAME_MAX} characters")
+     return insert_returning_id(
+         conn,
+-        "INSERT INTO leads (source, score) OUTPUT INSERTED.id VALUES (%s, %s)",
+-        (source, score),
++        "INSERT INTO leads (contact_name, source, score) OUTPUT INSERTED.id VALUES (%s, %s, %s)",
++        (contact_name, source, score),
+     )
+ 
+ 
+@@ -166,7 +172,7 @@ def activity_counts_bulk(conn, member_ids, quarter):
+     return counts
+ 
+ 
+-LEAD_COLUMNS = "id, source, score, assigned_member_id, assigned_at, created_at"
++LEAD_COLUMNS = "id, contact_name, source, score, assigned_member_id, assigned_at, created_at"
+ 
+ 
+ def get_lead(conn, lead_id):
+diff --git a/services/routing/tests/test_api.py b/services/routing/tests/test_api.py
+index ade561c..97250f0 100644
+--- a/services/routing/tests/test_api.py
++++ b/services/routing/tests/test_api.py
+@@ -86,11 +86,12 @@ def test_unknown_path_is_json_404(client):
+ @responses.activate
+ def test_new_lead_is_assigned_to_an_active_broker(client):
+     responses.get(BROKERS_URL, json={"broker_ids": [7]})
+-    response = client.post("/leads", json={"source": "website", "score": 85})
++    response = client.post("/leads", json={"contact_name": "Ada Lovelace", "source": "website", "score": 85})
+     assert response.status_code == 201
+     body = response.get_json()
+     assert body["band"] == "hot" and body["assignment"] == "assigned" and body["notice"] is None
+     assert body["lead"]["assigned_member_id"] == 7
++    assert body["lead"]["contact_name"] == "Ada Lovelace"
+     assert body["lead"]["assigned_at"].endswith("Z")
+ 
+ 
+@@ -98,7 +99,7 @@ def test_new_lead_is_assigned_to_an_active_broker(client):
+ @pytest.mark.parametrize("failure", KPI_DOWN)
+ def test_new_lead_is_saved_unassigned_when_kpi_is_unavailable(client, failure):
+     responses.get(BROKERS_URL, **failure)
+-    response = client.post("/leads", json={"source": "website", "score": 50})
++    response = client.post("/leads", json={"contact_name": "Ada Lovelace", "source": "website", "score": 50})
+     assert response.status_code == 201
+     body = response.get_json()
+     assert body["assignment"] == "skipped"
+@@ -111,28 +112,41 @@ def test_new_lead_is_saved_unassigned_when_kpi_is_unavailable(client, failure):
+ @responses.activate
+ def test_new_lead_without_active_brokers_is_saved_unassigned(client):
+     responses.get(BROKERS_URL, json={"broker_ids": []})
+-    body = client.post("/leads", json={"source": "website", "score": 50}).get_json()
++    body = client.post("/leads", json={"contact_name": "Ada Lovelace", "source": "website", "score": 50}).get_json()
+     assert body["assignment"] == "no_brokers"
+     assert body["lead"]["assigned_member_id"] is None
+ 
+ 
+ @pytest.mark.parametrize(
+     "lead",
+-    [{"source": "website"}, {"source": "website", "score": "high"}, {"source": "", "score": 50}, {"score": 50}],
++    [
++        {"contact_name": "Ada", "source": "website"},
++        {"contact_name": "Ada", "source": "website", "score": "high"},
++        {"contact_name": "Ada", "source": "", "score": 50},
++        {"contact_name": "Ada", "score": 50},
++        {"source": "website", "score": 50},
++        {"contact_name": "  ", "source": "website", "score": 50},
++        {"contact_name": "x" * 201, "source": "website", "score": 50},
++    ],
+ )
+ def test_new_lead_validation(client, lead):
+     assert client.post("/leads", json=lead).status_code == 400
+ 
+ 
+ def test_new_lead_score_out_of_range_is_400_and_nothing_is_saved(client):
+-    assert client.post("/leads", json={"source": "website", "score": 101}).status_code == 400
++    assert (
++        client.post("/leads", json={"contact_name": "Ada Lovelace", "source": "website", "score": 101}).status_code
++        == 400
++    )
+     assert client.get("/leads").get_json() == {"leads": []}
+ 
+ 
+ @responses.activate
+ def test_list_and_get_leads_with_outcomes(client):
+     responses.get(BROKERS_URL, json={"broker_ids": [1]})
+-    lead_id = client.post("/leads", json={"source": "referral", "score": 20}).get_json()["lead"]["id"]
++    lead_id = client.post(
++        "/leads", json={"contact_name": "Ada Lovelace", "source": "referral", "score": 20}
++    ).get_json()["lead"]["id"]
+     response = client.post(f"/leads/{lead_id}/outcomes", json={"stage": "showing_booked"})
+     assert response.status_code == 201
+     assert [o["outcome"] for o in response.get_json()["outcomes"]] == ["showing_booked"]
+@@ -140,11 +154,13 @@ def test_list_and_get_leads_with_outcomes(client):
+     assert [(lead["id"], lead["band"], lead["stage"]) for lead in listed] == [(lead_id, "cold", "showing_booked")]
+     detail = client.get(f"/leads/{lead_id}").get_json()
+     assert detail["band"] == "cold" and detail["source"] == "referral"
++    assert detail["contact_name"] == "Ada Lovelace"
++    assert listed and client.get("/leads").get_json()["leads"][0]["contact_name"] == "Ada Lovelace"
+     assert [o["outcome"] for o in detail["outcomes"]] == ["showing_booked"]
+ 
+ 
+ def test_outcome_errors(client, conn):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     assert client.post(f"/leads/{lead_id}/outcomes", json={"stage": "sold"}).status_code == 400
+     assert client.post(f"/leads/{MISSING_ID}/outcomes", json={"stage": "closed"}).status_code == 404
+     assert client.get(f"/leads/{MISSING_ID}").status_code == 404
+@@ -164,7 +180,7 @@ def test_leaderboard_ranks_the_active_brokers(client, conn):
+ @responses.activate
+ @pytest.mark.parametrize("failure", KPI_DOWN)
+ def test_leaderboard_falls_back_to_members_with_leads_when_kpi_is_unavailable(client, conn, failure):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     service.assign_lead(conn, lead_id, 5)
+     responses.get(BROKERS_URL, **failure)
+     body = client.get("/leaderboard").get_json()
+@@ -176,7 +192,7 @@ def test_leaderboard_falls_back_to_members_with_leads_when_kpi_is_unavailable(cl
+ 
+ 
+ def test_activity_returns_counts_for_every_requested_member(client, conn):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     service.assign_lead(conn, lead_id, 4)
+     quarter = app_module.utc_today()
+     quarter = f"{quarter.year}-Q{(quarter.month - 1) // 3 + 1}"
+@@ -221,6 +237,7 @@ def test_create_app_migrates_and_seeds_once(conn, monkeypatch):
+     app_module.create_app()
+     leads = service.list_leads(conn)
+     assert len(leads) == seed.LEAD_COUNT
++    assert all(lead["contact_name"] for lead in leads)
+     assert {lead["assigned_member_id"] for lead in leads} == {1, 2, 3}
+ 
+ 
+diff --git a/services/routing/tests/test_migrate.py b/services/routing/tests/test_migrate.py
+index d881561..77311ff 100644
+--- a/services/routing/tests/test_migrate.py
++++ b/services/routing/tests/test_migrate.py
+@@ -1,3 +1,4 @@
++import shutil
+ from contextlib import closing
+ 
+ import pymssql
+@@ -77,3 +78,32 @@ def test_failing_migration_is_rolled_back_and_not_recorded(fresh_conn, tmp_path)
+     # the first batch of 002 was undone with the rest, so a fixed 002 can run cleanly next start
+     assert "half_done" not in table_names(fresh_conn)
+     assert "ok_table" in table_names(fresh_conn)
++
++
++def test_002_backfills_contact_name_on_existing_leads(fresh_conn, tmp_path):
++    # boot with 001 only, as Azure did, and store leads the way the old code did
++    shutil.copy(f"{MIGRATIONS_DIR}/001_init.sql", tmp_path)
++    run_migrations(fresh_conn, tmp_path)
++    cur = fresh_conn.cursor()
++    cur.execute("INSERT INTO leads (source, score) OUTPUT INSERTED.id VALUES ('website', 80)")
++    first = cur.fetchone()["id"]
++    cur.execute("INSERT INTO leads (source, score) OUTPUT INSERTED.id VALUES ('phone', 20)")
++    second = cur.fetchone()["id"]
++    cur.execute("INSERT INTO lead_outcomes (lead_id, outcome) VALUES (%s, 'closed')", (first,))
++    fresh_conn.commit()
++
++    # the next deploy brings 002
++    shutil.copy(f"{MIGRATIONS_DIR}/002_add_contact_name.sql", tmp_path)
++    assert run_migrations(fresh_conn, tmp_path) == ["002_add_contact_name.sql"]
++
++    cur.execute("SELECT id, contact_name, source, score FROM leads ORDER BY id")
++    assert cur.fetchall() == [
++        {"id": first, "contact_name": f"Lead #{first}", "source": "website", "score": 80},
++        {"id": second, "contact_name": f"Lead #{second}", "source": "phone", "score": 20},
++    ]
++    cur.execute("SELECT COUNT(*) AS n FROM lead_outcomes WHERE lead_id = %s", (first,))
++    assert cur.fetchone()["n"] == 1
++    # the column is required from now on
++    with pytest.raises(pymssql.IntegrityError):
++        cur.execute("INSERT INTO leads (source, score) VALUES ('website', 50)")
++    fresh_conn.rollback()
+diff --git a/services/routing/tests/test_service.py b/services/routing/tests/test_service.py
+index 84ff347..e8a1fd7 100644
+--- a/services/routing/tests/test_service.py
++++ b/services/routing/tests/test_service.py
+@@ -21,10 +21,10 @@ def add_lead(conn, member_id, score, assigned_at, stages=(), created_at="2026-10
+     cur = conn.cursor()
+     cur.execute(
+         """
+-        INSERT INTO leads (source, score, assigned_member_id, assigned_at, created_at)
+-        OUTPUT INSERTED.id VALUES (%s, %s, %s, %s, %s)
++        INSERT INTO leads (contact_name, source, score, assigned_member_id, assigned_at, created_at)
++        OUTPUT INSERTED.id VALUES (%s, %s, %s, %s, %s, %s)
+         """,
+-        ("website", score, member_id, assigned_at, created_at),
++        ("Ada Contact", "website", score, member_id, assigned_at, created_at),
+     )
+     lead_id = cur.fetchone()["id"]
+     conn.commit()
+@@ -139,7 +139,7 @@ def test_open_lead_count_excludes_closed_leads(conn):
+ 
+ 
+ def test_assign_lead_records_when_it_was_assigned(conn):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     assert service.last_assigned_at(conn, 1) is None
+     service.assign_lead(conn, lead_id, 1)
+     assert isinstance(service.last_assigned_at(conn, 1), datetime)
+@@ -152,16 +152,28 @@ def test_assign_lead_records_when_it_was_assigned(conn):
+ @pytest.mark.parametrize("score", [-1, 101])
+ def test_create_lead_rejects_score_outside_0_to_100(conn, score):
+     with pytest.raises(ValueError):
+-        service.create_lead(conn, "website", score)
++        service.create_lead(conn, "website", score, "Ada Contact")
+     assert service.list_leads(conn) == []
+ 
+ 
+ @pytest.mark.parametrize("score", [0, 100])
+ def test_create_lead_accepts_boundary_scores(conn, score):
+-    lead_id = service.create_lead(conn, "website", score)
++    lead_id = service.create_lead(conn, "website", score, "Ada Contact")
+     assert service.get_lead(conn, lead_id)["score"] == score
+ 
+ 
++@pytest.mark.parametrize("contact_name", ["", "   ", "x" * 201])
++def test_create_lead_rejects_missing_or_too_long_contact_name(conn, contact_name):
++    with pytest.raises(ValueError):
++        service.create_lead(conn, "website", 50, contact_name)
++    assert service.list_leads(conn) == []
++
++
++def test_create_lead_trims_contact_name(conn):
++    lead_id = service.create_lead(conn, "website", 50, "  Ada Lovelace ")
++    assert service.get_lead(conn, lead_id)["contact_name"] == "Ada Lovelace"
++
++
+ def test_assign_lead_on_missing_lead_raises(conn):
+     with pytest.raises(ValueError):
+         service.assign_lead(conn, MISSING_ID, 1)
+@@ -173,7 +185,7 @@ def test_record_outcome_on_missing_lead_raises(conn):
+ 
+ 
+ def test_record_outcome_rejects_invalid_stage(conn):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     with pytest.raises(ValueError):
+         service.record_outcome(conn, lead_id, "sold")
+     assert service.list_outcomes(conn, lead_id) == []
+@@ -274,8 +286,9 @@ def test_activity_counts_bulk_with_no_members(conn):
+ 
+ 
+ def test_get_lead(conn):
+-    lead_id = service.create_lead(conn, "referral", 72)
++    lead_id = service.create_lead(conn, "referral", 72, "Ada Contact")
+     lead = service.get_lead(conn, lead_id)
++    assert lead["contact_name"] == "Ada Contact"
+     assert lead["source"] == "referral"
+     assert lead["score"] == 72
+     assert lead["assigned_member_id"] is None
+@@ -286,7 +299,7 @@ def test_get_lead_returns_none_for_unknown_id(conn):
+ 
+ 
+ def test_list_outcomes_in_recorded_order(conn):
+-    lead_id = service.create_lead(conn, "website", 50)
++    lead_id = service.create_lead(conn, "website", 50, "Ada Contact")
+     service.record_outcome(conn, lead_id, "showing_booked")
+     service.record_outcome(conn, lead_id, "showing_performed")
+     outcomes = service.list_outcomes(conn, lead_id)
+@@ -312,7 +325,7 @@ def test_assigned_member_ids_lists_everyone_with_a_lead_once(conn):
+     add_lead(conn, 3, 50, "2026-10-01 09:00:00")
+     add_lead(conn, 1, 50, "2026-10-01 09:00:00")
+     add_lead(conn, 3, 50, "2026-10-02 09:00:00")
+-    service.create_lead(conn, "website", 50)  # unassigned
++    service.create_lead(conn, "website", 50, "Ada Contact")  # unassigned
+     assert service.assigned_member_ids(conn) == [1, 3]
+ 
+ 
+diff --git a/tests/integration/test_seam.py b/tests/integration/test_seam.py
+index 4270b97..1c1f601 100644
+--- a/tests/integration/test_seam.py
++++ b/tests/integration/test_seam.py
+@@ -57,7 +57,7 @@ def ok(response, status=200):
+ 
+ 
+ def new_lead(score):
+-    body = {"source": "integration test", "score": score}
++    body = {"contact_name": "Integration Test", "source": "integration test", "score": score}
+     return ok(routing("POST", "/leads", json=body), 201)
+ 
+ 
+diff --git a/ui/js/views/lead-detail.js b/ui/js/views/lead-detail.js
+index 048ab3d..ecbd08d 100644
+--- a/ui/js/views/lead-detail.js
++++ b/ui/js/views/lead-detail.js
+@@ -43,7 +43,8 @@ export async function render(ctx) {
+     } else lookup = new Map();
+   }
+ 
+-  page.el.querySelector(".page-heading").append(h("p", { class: "page-intro" }, "From ", h("span", { class: "capitalise" }, lead.source)));
++  page.el.querySelector(".page-heading").append(h("p", { class: "page-intro" },
++    lead.contact_name, " · from ", h("span", { class: "capitalise" }, lead.source)));
+ 
+   const info = h("section", { class: "card section-card", "aria-labelledby": "info-heading" });
+   const history = h("section", { class: "card section-card", "aria-labelledby": "history-heading" });
+@@ -57,6 +58,7 @@ export async function render(ctx) {
+     clear(info,
+       h("h2", { class: "section-title", id: "info-heading" }, "Lead"),
+       h("dl", { class: "facts" },
++        fact("Contact", lead.contact_name),
+         fact("Band", bandTag(lead.band)),
+         fact("Score", String(lead.score)),
+         fact("Source", h("span", { class: "capitalise" }, lead.source)),
+diff --git a/ui/js/views/lead-new.js b/ui/js/views/lead-new.js
+index 499acda..407d408 100644
+--- a/ui/js/views/lead-new.js
++++ b/ui/js/views/lead-new.js
+@@ -19,6 +19,10 @@ export async function render(ctx) {
+   ctx.root.append(page.el);
+ 
+   const errorSlot = h("div", { "aria-live": "polite" });
++  const contact = h("input", {
++    class: "input", id: "lead-contact", name: "contact_name", autocomplete: "off", spellcheck: "false",
++    maxlength: "200", required: true, placeholder: "e.g. Ana García…",
++  });
+   const source = h("input", {
+     class: "input", id: "lead-source", name: "source", list: "lead-sources", autocomplete: "off",
+     maxlength: "100", required: true, placeholder: "e.g. boat show…",
+@@ -51,6 +55,9 @@ export async function render(ctx) {
+ 
+   const form = h("form", { class: "card form-card form-narrow", novalidate: true },
+     errorSlot,
++    h("div", { class: "field" },
++      h("label", { for: "lead-contact" }, "Contact name"),
++      contact),
+     h("div", { class: "field" },
+       h("label", { for: "lead-source" }, "Source"),
+       source,
+@@ -77,6 +84,7 @@ export async function render(ctx) {
+     clear(errorSlot);
+     const problems = [];
+     const value = Number(score.value);
++    if (!contact.value.trim()) problems.push([contact, "Enter the name of the person enquiring."]);
+     if (!source.value.trim()) problems.push([source, "Enter where the lead came from."]);
+     if (score.value === "" || !Number.isInteger(value) || value < 0 || value > 100) problems.push([score, "Use a whole number from 0 to 100."]);
+     if (showFieldErrors(form, problems)) return;
+@@ -84,7 +92,7 @@ export async function render(ctx) {
+     setBusy(submit, true, "Saving…");
+     let created;
+     try {
+-      created = await api.addLead({ source: source.value.trim(), score: value });
++      created = await api.addLead({ contact_name: contact.value.trim(), source: source.value.trim(), score: value });
+     } catch (err) {
+       const error = toApiError(err);
+       errorSlot.append(errorBanner(error, "The lead was not saved", {
+@@ -110,7 +118,7 @@ export async function render(ctx) {
+     }
+     const card = h("section", { class: "card result-card", "aria-labelledby": "result-heading", tabindex: "-1" },
+       h("h2", { class: "section-title", id: "result-heading" }, `Lead #${lead.id} saved`),
+-      h("p", { class: "result-meta" }, bandTag(band), ` lead from ${lead.source}, score ${lead.score}.`),
++      h("p", { class: "result-meta" }, bandTag(band), ` lead for ${lead.contact_name} from ${lead.source}, score ${lead.score}.`),
+       assignment === "assigned"
+         ? brokerLine
+         : banner("notice", "Saved without a broker",
+diff --git a/ui/js/views/leads.js b/ui/js/views/leads.js
+index f104966..1c8a28a 100644
+--- a/ui/js/views/leads.js
++++ b/ui/js/views/leads.js
+@@ -60,6 +60,7 @@ export async function render(ctx) {
+     h("caption", { class: "visually-hidden" }, band === "all" ? "All leads" : `${BAND_LABELS[band]} leads`),
+     h("thead", {}, h("tr", {},
+       h("th", { scope: "col", class: "num" }, "Lead"),
++      h("th", { scope: "col" }, "Contact"),
+       h("th", { scope: "col" }, "Source"),
+       h("th", { scope: "col" }, "Band"),
+       h("th", { scope: "col", class: "num" }, "Score"),
+@@ -68,7 +69,8 @@ export async function render(ctx) {
+       h("th", { scope: "col" }, "Created"))),
+     h("tbody", {}, shown.map((lead) => h("tr", {},
+       h("td", { class: "num" }, h("a", { class: "strong-link", href: `#/leads/${lead.id}` }, `#${lead.id}`)),
+-      h("td", { class: "cell-source" }, h("a", { href: `#/leads/${lead.id}` }, lead.source)),
++      h("td", { class: "cell-contact" }, h("a", { href: `#/leads/${lead.id}` }, lead.contact_name)),
++      h("td", { class: "capitalise" }, lead.source),
+       h("td", {}, bandTag(lead.band)),
+       h("td", { class: "num" }, String(lead.score)),
+       h("td", {}, stageTag(lead.stage)),
+diff --git a/ui/styles.css b/ui/styles.css
+index 0ae6f4e..b06eb41 100644
+--- a/ui/styles.css
++++ b/ui/styles.css
+@@ -247,6 +247,11 @@ button, input, select { font: inherit; color: inherit; }
+ .cell-sub { font-size: 13px; color: var(--ink-3); }
+ .cell-source a { color: var(--ink); text-decoration: none; text-transform: capitalize; }
+ .cell-source a:hover { color: var(--accent-ink); text-decoration: underline; }
++/* names keep their own capitalisation. The cell's min-width keeps ordinary names whole on
++   narrow screens; the link's max-width stops one very long name stretching the whole table. */
++.cell-contact { min-width: 9.5rem; }
++.cell-contact a { display: inline-block; max-width: 18rem; overflow-wrap: anywhere; color: var(--ink); font-weight: 500; text-decoration: none; }
++.cell-contact a:hover { color: var(--accent-ink); text-decoration: underline; }
+ .member-id { color: var(--ink-2); }
+ .member-name { display: inline-flex; align-items: center; flex-wrap: wrap; }
+ .confirm-text { font-size: 13px; color: var(--danger-ink); margin-right: 8px; }
+@@ -422,7 +427,7 @@ a, button, select, .segment { -webkit-tap-highlight-color: rgba(10, 122, 116, 0.
+ .input, .input-select { color: var(--ink); background-color: var(--surface); }
+ .input:disabled { background-color: var(--surface-2); color: var(--ink-3); }
+ .section-title, .member-card-name, .empty-title, .banner-title { text-wrap: balance; }
+-.page-title, .member-card-name, .cell-source, .fact dd, .result-meta, .kpi-name { overflow-wrap: anywhere; }
++.page-title, .page-intro, .member-card-name, .cell-source, .fact dd, .result-meta, .kpi-name { overflow-wrap: anywhere; }
+ .kpi-name { min-width: 0; }
+ /* the progress fill grows with transform (GPU), not width */
+ .bar-fill { width: 100%; transform-origin: left center; transition: transform .5s cubic-bezier(.2, .7, .2, 1); }

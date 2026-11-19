@@ -11,81 +11,52 @@ variable "location" {
 }
 
 variable "resource_group_name" {
-  description = "Resource group that holds everything (the class one, e.g. rg-sdd-3a)."
+  description = "The class's shared resource group, rg-sdd-3a or rg-sdd-3b (TODO: confirm). Only read, never created."
   type        = string
 }
 
-variable "create_resource_group" {
-  description = "true creates the resource group; false (the class setup) uses an existing one, which the service principal cannot create anyway."
-  type        = bool
-  default     = false
-}
+# --- the two services ---
 
-# --- network and VM ---
-
-variable "vnet_cidr" {
-  description = "Address space of the virtual network."
+variable "image_registry" {
+  description = "Registry and namespace of the service images."
   type        = string
-  default     = "10.20.0.0/16"
+  default     = "ghcr.io/jadelaawar42027"
 }
 
-variable "subnet_cidr" {
-  description = "Address range of the VM subnet."
-  type        = string
-  default     = "10.20.1.0/24"
-}
-
-variable "admin_cidr" {
-  description = "The only source range allowed to reach SSH (through the load balancer's NAT rule on port 50022), e.g. your public IP as 203.0.113.7/32."
-  type        = string
-
-  validation {
-    condition     = can(cidrhost(var.admin_cidr, 0)) && var.admin_cidr != "0.0.0.0/0"
-    error_message = "admin_cidr must be a CIDR range and must not be 0.0.0.0/0."
-  }
-}
-
-variable "vm_size" {
-  description = "VM size. Standard_B2s: 2 vCPU, 4 GB RAM, enough for two gunicorn services and two nginx containers."
-  type        = string
-  default     = "Standard_B2s"
-}
-
-variable "vm_admin_username" {
-  description = "Linux admin user on the VM."
-  type        = string
-  default     = "azureuser"
-}
-
-variable "ssh_public_key" {
-  description = "SSH public key (OpenSSH format) for the admin user. Password login is disabled."
+variable "image_tag" {
+  description = "Tag of both images to run: the commit SHA, set by the pipeline."
   type        = string
 }
 
-# --- load balancer and DNS ---
-
-variable "domain_name_label" {
-  description = "DNS label of the public IP: gives <label>.<location>.cloudapp.azure.com."
+variable "registry_username" {
+  description = "Only for private GHCR packages: the GitHub user that owns the read token. Empty when the packages are public."
   type        = string
-  default     = "jelaawar-ieu2023"
+  default     = ""
 }
 
-variable "ssh_nat_port" {
-  description = "Port on the load balancer that is forwarded to SSH (22) on the VM."
-  type        = number
-  default     = 50022
+variable "registry_password" {
+  description = "Only for private GHCR packages: a token with read:packages. Empty when the packages are public."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
-variable "lb_probe_path" {
-  description = "HTTP path the load balancer probes on port 80. Answered by nginx itself, so the probe never wakes the databases (see deploy/nginx.conf)."
+variable "seed_demo" {
+  description = "1 loads demo data into empty databases on start."
   type        = string
-  default     = "/lb-probe"
+  default     = "1"
 }
 
-variable "dns_zone_name" {
-  description = "Azure DNS zone. Not delegated (no owned domain): resolve it against the zone's own name servers."
+variable "kpi_db_password" {
+  description = "Password of the contained database user kpi_svc. From a GitHub secret; stored as a Container App secret."
   type        = string
-  default     = "jelaawar-ieu2023.devops.ie"
+  sensitive   = true
+}
+
+variable "routing_db_password" {
+  description = "Password of the contained database user routing_svc. From a GitHub secret; stored as a Container App secret."
+  type        = string
+  sensitive   = true
 }
 
 # --- SQL ---

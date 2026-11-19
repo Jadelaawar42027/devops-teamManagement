@@ -2,40 +2,33 @@ output "resource_group_name" {
   value = local.resource_group_name
 }
 
-output "public_ip" {
-  description = "Static public IP of the load balancer."
-  value       = azurerm_public_ip.lb.ip_address
+output "container_apps_environment" {
+  value = azurerm_container_app_environment.main.name
 }
 
-output "fqdn" {
-  description = "Public DNS name of the load balancer (works without any domain)."
-  value       = azurerm_public_ip.lb.fqdn
+output "kpi_url" {
+  description = "Public HTTPS base URL of the KPI service."
+  value       = "https://${azurerm_container_app.service["kpi"].ingress[0].fqdn}"
 }
 
-output "app_url" {
-  value = "http://${azurerm_public_ip.lb.fqdn}"
+output "routing_url" {
+  description = "Public HTTPS base URL of the routing service."
+  value       = "https://${azurerm_container_app.service["routing"].ingress[0].fqdn}"
 }
 
-output "dns_zone_name" {
-  value = azurerm_dns_zone.main.name
+output "static_web_app_name" {
+  value = azurerm_static_web_app.ui.name
 }
 
-output "dns_name_servers" {
-  description = "Azure name servers of the zone. Ask one directly: nslookup app.<zone> <name server>."
-  value       = azurerm_dns_zone.main.name_servers
+output "ui_url" {
+  description = "The public URL of the system: the Static Web App's."
+  value       = "https://${azurerm_static_web_app.ui.default_host_name}"
 }
 
-output "dns_app_record" {
-  value = "${azurerm_dns_a_record.app.name}.${azurerm_dns_zone.main.name}"
-}
-
-output "vm_name" {
-  value = azurerm_linux_virtual_machine.app.name
-}
-
-output "ssh_command" {
-  description = "SSH through the load balancer's NAT rule (only from admin_cidr)."
-  value       = "ssh -p ${var.ssh_nat_port} ${var.vm_admin_username}@${azurerm_public_ip.lb.fqdn}"
+output "static_web_app_api_key" {
+  description = "Deployment token of the Static Web App. Copy it into the GitHub secret AZURE_STATIC_WEB_APPS_API_TOKEN."
+  value       = azurerm_static_web_app.ui.api_key
+  sensitive   = true
 }
 
 output "sql_server_name" {

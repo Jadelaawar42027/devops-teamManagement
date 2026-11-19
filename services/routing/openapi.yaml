@@ -8,14 +8,17 @@ info:
 
     Every response is JSON. Errors have the shape {"error": "..."}. Any endpoint that reads the
     database answers 500 {"error": "internal error"} if the database cannot be reached after the
-    connection retries. Behind the proxy the paths are prefixed with /api/routing.
+    connection retries.
 
     Called by the KPI service: GET /activity.
     Calls the KPI service: GET /brokers/active (from POST /leads and GET /leaderboard).
     Member ids here are KPI member ids, stored without a foreign key (ADR-3, ADR-7).
 servers:
-  - url: /api/routing
-    description: Through the nginx proxy (local compose and the Azure VM)
+  - url: https://jelaawar-ieu2023-routing.{environmentDomain}
+    description: Azure Container App (the environment's domain is printed by each CD run)
+    variables:
+      environmentDomain:
+        default: westeurope.azurecontainerapps.io
   - url: http://localhost:8002
     description: The container directly, local compose only
 tags:
