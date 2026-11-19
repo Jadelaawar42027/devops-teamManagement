@@ -13,7 +13,7 @@ Consequences: Each domain is self-contained, so it can be lifted out into its ow
 
 ## 2. Split the app into kpi and routing packages joined by one function, activity_counts()
 Date: 2026-10-02
-Status: Decided
+Status: Superseded by 6
 Context: The app has two areas, team/KPIs and lead routing, which are expected to become separate services in Assignment 2. They can't be fully independent: every KPI actual (leads assigned, showings booked, showings performed, deals closed) comes from data the routing domain records. Without a planned boundary, KPI code would end up querying leads and lead_outcomes directly, or routing code would write into KPI tables, and a change to one domain's tables would break the other domain's code.
 Decision: Each domain is its own package, kpi/ and routing/, with its own routes.py (a Flask blueprint), its own service.py and its own tables. KPI code gets routing data through exactly one function, routing.service.activity_counts(conn, member_id, quarter), where quarter is a string like "2026-Q4". It returns a dictionary with four counts for that member and quarter: leads_assigned, showings_booked, showings_performed and deals_closed. These are the same names a KPI definition stores in its metric column, so kpi_progress() in kpi/service.py looks each actual up by key and compares it to the target. A lead is counted in the quarter it was assigned, and an outcome in the quarter it was recorded. KPI code never queries leads or lead_outcomes, and routing never reads or writes a KPI table. What the two domains still share is the plumbing: one schema.sql, one app.db, the get_connection() function in db.py, and the base.html template. That sharing is also why KPI code can pass its own connection (conn) into activity_counts().
 Alternatives considered:
@@ -36,7 +36,7 @@ Consequences: KPI numbers always match the recorded outcomes with no sync code, 
 
 ## 4. Test the service modules against a real database, and leave the routes untested
 Date: 2026-10-03
-Status: Decided
+Status: Superseded by 9
 Context: The brief requires at least 70% test coverage on the core business logic of both domains, which I take to mean kpi/service.py and routing/service.py, and the deadline is under a week. A coverage check partway through showed kpi/service.py at 0% and routing/service.py at 67% (43% combined), because tests had only been written for scoring and lead assignment. I had to choose where the remaining testing time went.
 Decision: Test only the two service modules with pytest. Pure functions (score_from_results, band_for_score, parse_quarter, quarter_dates) are called directly. Everything that runs SQL is tested against a real temporary SQLite database, created fresh for each test by the conn fixture in conftest.py, with no mocking. I prioritised the logic where a mistake gives a plausible wrong answer instead of an error: broker scoring, banding and the assignment rules came first. Validation, activity_counts() and KPI progress came after the coverage check. The result is 100% on both service files from 65 tests.
 Alternatives considered:
@@ -56,3 +56,44 @@ Alternatives considered:
 - Login: Flask's built-in sessions and Werkzeug's password hashing mean it needs no extra package, but it does need a users table, a first-user setup step, a check on every route, and a secret key, which would either become a required env var or log everyone out on each restart. None of that serves the two core domains.
 
 Consequences: The time went into the scoring and assignment logic, 100% coverage of the service modules, and the documentation. The cost is that anyone who can reach the app can view and edit everything. It binds 0.0.0.0, so that means anyone on the same network, and nothing in the app enforces the internal-network assumption. Login must be added before the public Azure deployment in Assignment 2. Data entry is manual, including each lead's score. A CRM webhook that creates leads automatically is the most valuable next feature, but it depends on things left out here: an open endpoint that creates leads needs authentication first, each lead needs a score sent by the CRM or calculated by the app, and the leads table has no external id to stop the same CRM lead being created twice.
+
+## 6. Split along the ADR-2 seam, with two server-side HTTP calls that degrade instead of failing
+Date: 2026-11-19
+Status: Draft
+Context: Assignment 2 turns the monolith into two services, each with its own container and database, talking over HTTP. ADR-2 drew the seam between team/KPIs and lead routing and limited what crossed it to two in-process calls: KPI read routing's counts through activity_counts(), and routing read the active brokers through active_broker_ids(). Now each call is an HTTP request that can time out or find the other service stopped, and the brief requires at least one flow to cross the seam server side and every failure to be handled.
+Decision: Keep the seam where ADR-2 put it. The KPI service owns roles, members, kpi_definitions and kpi_targets. The routing service owns leads and lead_outcomes. Exactly two endpoints cross the seam, and both calls are made server side:
+- KPI's GET /dashboard calls routing's GET /activity?quarter=&member_ids=, one call for every member with a target, instead of ADR-2's one call per member.
+- Routing's POST /leads and GET /leaderboard call KPI's GET /brokers/active.
+Each service finds the other through an environment variable (ROUTING_URL, KPI_URL), and every call has a 2-second timeout (ROUTING_TIMEOUT_S, KPI_TIMEOUT_S). When the other side is unreachable, times out, or answers anything but 200, the caller degrades instead of failing:
+- The dashboard still shows every target, with actual and percent set to null and a notice.
+- A new lead is saved without a broker (assignment "skipped") and a notice says so.
+- The leaderboard ranks every member who has leads, with a notice.
+The UI joins broker names client side from KPI's GET /members, and shows "#id" when KPI is down.
+Alternatives considered:
+- Let the UI call both services and combine the results for the dashboard: this works without any server-to-server call, but the brief needs one server-side flow, and matching each target's metric to a count is KPI's business logic, which would then live in JavaScript.
+- Keep one /activity call per member, as ADR-2 planned: with routing down, each call waits for its own timeout, so 15 members could make the dashboard hang for 30 seconds. One bulk call waits at most 2 seconds and is one round trip when routing is up.
+- Retry, or cache the last good answer: a retry doubles the wait when the other service really is down. A cache would show old numbers as if they were current, and would need storage of its own. Showing the targets with a clear "actuals unavailable" notice is honest and needs neither.
+- Move the seam, for example by giving routing a copy of the members: that is the duplicated data ADR-3 rejected, and it would have to be kept in sync across two databases.
+Consequences: ADR-2 held. The two functions it named became the only two endpoints that cross the seam, and no SQL had to be rewritten across it. The bulk /activity endpoint is a change from ADR-2, and it is capped at 200 member ids per call. Each service keeps working on its own domain when the other is stopped, which the integration test checks (ADR-9). The cost is weaker consistency at the edges. A lead saved while KPI is down stays unassigned until someone assigns it, because nothing retries it later. The leaderboard fallback can include inactive brokers. And the dashboard's numbers depend on two databases being read at slightly different moments.
+
+## 7. One database and login per service, a numbered-SQL migration runner, and forward-only recovery
+Date: 2026-11-19
+Status: Draft
+Context: Assignment 1 had one SQLite file created from schema.sql on first boot. Now each service needs its own SQL Server database that only it can open, and the schema has to change in place once a database holds data. A migration runs on startup against the live database, so a bad one would hit real rows.
+Decision: Each service has its own database and its own user. Locally that is db/init.sql, which is idempotent and creates the kpi and routing databases with a kpi_svc and a routing_svc login, each a user in its own database only. On Azure, the pipeline creates contained users with deploy/create_db_users.py. These are users that exist only inside their database, with no server login, created through the server admin, which the apps never use. Each user is db_owner of its own database, because each service runs its own migrations.
+The SQLite schema was ported by hand: INTEGER PRIMARY KEY AUTOINCREMENT became INT IDENTITY, TEXT became NVARCHAR, text dates became DATETIME2 with SYSUTCDATETIME() defaults, lastrowid became OUTPUT INSERTED.id, and the upsert became an UPDATE followed by an INSERT when no row was updated.
+Migrations are numbered SQL files in each service's migrations/ folder, run by a small runner of my own (migrate.py) when the service starts:
+- every applied file is recorded in schema_migrations, so a second start applies nothing;
+- each file runs in one transaction, so a failing file is rolled back completely and is not recorded;
+- a line containing only GO splits a file into batches, because SQL Server cannot use a column added by ALTER TABLE in the same batch.
+gunicorn --preload runs migrations once per container, not once per worker. There is exactly one container per service, so migrations never run twice at the same time.
+No data had to move. The Assignment 1 database only ever held local demo data, so the new databases start empty and the idempotent demo seed fills them.
+Alternatives considered:
+- Alembic: it works without an ORM, but it adds a package and its own revision chain to learn and explain, while the migrations I need are plain SQL. My runner is about 70 lines, and its tests cover running once, rollback, and a column added and backfilled in a table that holds data.
+- One shared database with a schema per service: it is cheaper, but one login could be granted both schemas by mistake. The brief also requires one serverless database per service.
+- Running migrations from the pipeline instead of at startup: this is safer once there is more than one replica (see ADR-8), but it needs a migration step with database access from GitHub. With one container per service, running them at startup is simpler.
+Consequences: Integrity lost at the seam: leads.assigned_member_id points into another database, so no foreign key can check it (ADR-3 already left it out for this reason). It is compensated in code: routing only assigns ids it just received from KPI's /brokers/active, and KPI never deletes members, it only deactivates them, so an id on a lead always names a member who existed.
+Recovery plan for a bad migration (forward-only, no down-migrations):
+1. A migration that fails is rolled back by its transaction and is not recorded. The service does not start and its container keeps restarting, while the other service keeps working (ADR-6). The fix is a new commit through CI and CD. Because the failed file never ran anywhere, it may be corrected in place if it also never succeeded in CI or locally; otherwise the fix is a new numbered file.
+2. A migration that succeeds but damages data is never edited. The correction is a new numbered migration. If rows were lost, Azure SQL's automatic backups allow a point-in-time restore of the database to a new database from before the deploy, and the lost rows are copied back from it.
+3. Before a migration that changes existing data, I take the data-before evidence and keep the restore point in mind. later/002_add_contact_name.sql is held back until Azure already holds data, for exactly this reason.
