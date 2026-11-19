@@ -189,7 +189,14 @@ terraform plan
 - per service: ruff, pytest against a SQL Server service container with coverage (fails under 70%), and `docker build`
 - the integration test above, on the compose stack, with each service stopped in turn, plus a check that a restart applies no migrations
 - `terraform fmt -check` and `terraform validate`
-- `openapi-spec-validator` on both OpenAPI documents, `check-jsonschema` on `system.yaml`, and actionlint on the workflows
+- `openapi-spec-validator` on both OpenAPI documents, `check-jsonschema` on `system.yaml` (see the note below), and actionlint on the workflows
+
+**Note on `system.yaml` and `system.schema.json`.** The assignment PDF and the provided schema conflict on where the UI is hosted. The PDF requires a Static Web App, and its own example uses `ui.static_web_app`. The schema requires `ui.storage_account` and rejects anything else. The PDF is followed, so `system.yaml` names the Static Web App `jelaawar-ieu2023-ui`. CI validates `system.yaml` against a copy of the provided schema with exactly one allowance: `ui` may have `static_web_app` instead of `storage_account`. Every other rule is unchanged. The copy is made by `scripts/patch_schema_for_swa.py`, and CI prints its diff. `system.schema.json` itself is untouched, and the patch is removed if a corrected schema is provided. To run the same check locally:
+
+```
+python scripts/patch_schema_for_swa.py --output /tmp/system.schema.ci.json
+check-jsonschema --schemafile /tmp/system.schema.ci.json system.yaml
+```
 
 `.github/workflows/cd.yml` runs only after CI succeeded for a push to `main`, so changes reach Azure by merging a pull request:
 

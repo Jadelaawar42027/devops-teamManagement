@@ -184,8 +184,16 @@ jobs:
       - name: OpenAPI documents are valid OpenAPI
         run: openapi-spec-validator services/kpi/openapi.yaml services/routing/openapi.yaml
 
-      - name: system.yaml matches system.schema.json
-        run: check-jsonschema --schemafile system.schema.json system.yaml
+      # The provided schema requires ui.storage_account, but the assignment PDF puts the UI on
+      # a Static Web App (ADR-8). CI validates against a copy with exactly one allowance:
+      # ui.static_web_app instead of ui.storage_account. system.schema.json itself is untouched.
+      - name: Show the one change the CI copy of the schema makes
+        run: python scripts/patch_schema_for_swa.py --diff
+
+      - name: system.yaml matches system.schema.json (plus the Static Web App allowance)
+        run: |
+          python scripts/patch_schema_for_swa.py --output "$RUNNER_TEMP/system.schema.ci.json" > /dev/null
+          check-jsonschema --schemafile "$RUNNER_TEMP/system.schema.ci.json" system.yaml
 
       - name: Lint workflows (actionlint)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
